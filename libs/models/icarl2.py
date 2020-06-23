@@ -160,9 +160,10 @@ class iCaRLModel(nn.Module):
                         features = self._extract_features(imgs)
                         flatten_features.append(features)
 
-                    flatten_features = torch.cat(flatten_features).to(self.device)
-                    class_mean = flatten_features.mean(0)
-                    class_mean = class_mean / class_mean.norm()
+                    flatten_features = torch.cat(flatten_features).cpu().numpy()
+                    class_mean = np.mean(flatten_features, axis=0)
+                    class_mean = class_mean / np.linalg.norm(class_mean)
+                    class_mean = torch.from_numpy(class_mean).to(self.device)
                     exemplar_means.append(class_mean)
 
             self.compute_means = False
