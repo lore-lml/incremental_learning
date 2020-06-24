@@ -59,7 +59,11 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net = resnet32(num_classes=num_classes, classifier=classifier)
+        if classifier == 'cosine':
+            self.net = resnet32(num_classes=num_classes, classifier=classifier)
+        else:
+            self.net = resnet32(num_classes=num_classes)
+
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
