@@ -223,15 +223,19 @@ class iCaRLModel(nn.Module):
 
     def _bias_training(self, eval_dataloader):
         args = utils.get_arguments()
-        bias_optimizer = torch.optim.Adam(self.bias_layer.parameters(), lr=0.001)
-        scheduler_bias = torch.optim.lr_scheduler.MultiStepLR(bias_optimizer, milestones=[13], gamma=args['GAMMA'], last_epoch=-1)
+        """bias_optimizer = torch.optim.Adam(self.bias_layer.parameters(), lr=0.01)
+        scheduler_bias = torch.optim.lr_scheduler.MultiStepLR(bias_optimizer, milestones=[13], gamma=args['GAMMA'], last_epoch=-1)"""
+        bias_optimizer, scheduler_bias = utils.get_otpmizer_scheduler(self.bias_layer.parameters(), args['LR'],
+                                                                      args['MOMENTUM'], args['WEIGHT_DECAY'],
+                                                                      [13], args['GAMMA'])
         criterion = self.criterion_bias
 
-        if self.known_classes == 0:
+        if self.known_classes > 0:
             self.net.eval()
             current_step = 0
             epochs = 20
 
+            self.bias_layer.train()
             for epoch in range(epochs):
                 print(f"\tSTARTING Bias Training EPOCH {epoch + 1} - LR={scheduler_bias.get_last_lr()}...")
 
@@ -244,7 +248,8 @@ class iCaRLModel(nn.Module):
                     bias_optimizer.zero_grad()  # Zero-ing the gradients
 
                     # Forward pass to the network and to the bias layer
-                    outputs = self.net(images)
+                    with torch.no_grad():
+                        outputs = self.net(images)
                     outputs = self.bias_forward(outputs, self.known_classes)
 
                     # One hot encoding labels for binary cross-entropy loss
@@ -252,13 +257,13 @@ class iCaRLModel(nn.Module):
 
                     loss = criterion(outputs, labels_one_hot)
 
-                    if i != 0 and i % 10 == 0:
-                        print(f"\t\tEpoch {epoch + 1}: Train_loss = {loss.item()}")
+                    if i != 0 and i % 20 == 0:
+                        print(f"\t\tBias Training Epoch {epoch + 1}: Train_loss = {loss.item()}")
 
                     loss.backward()  # backward pass: computes gradients
                     bias_optimizer.step()  # update weights based on accumulated gradients
                     current_step += 1
-            scheduler_bias.step()
+                scheduler_bias.step()
 
     def compute_distillation_loss(self, images, labels, new_outputs):
         if self.known_classes == 0:
