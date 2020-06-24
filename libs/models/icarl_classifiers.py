@@ -73,10 +73,8 @@ class iCaRLModel(nn.Module):
         self.compute_means = True
         self.exemplar_means = []
 
-        self.clf = None  # store classifiers object (SVM, KNN...) to test them
-        # multiple times without fitting it at each test
-        # (if no training in the meanwhile)
-        self.params_clf = []
+        self.clf = None  # store classifiers object (SVM, KNN...)
+        self.params_clf = []  # store best_parameters for each stage
 
         if classifier == 'bias':
             self.criterion_bias = nn.BCEWithLogitsLoss(reduction='mean')
