@@ -154,6 +154,8 @@ class iCaRLModel(nn.Module):
         else:
             return
 
+        print(f"Training {clf_type}")
+
         X, y = [], []
 
         self.net.eval()
