@@ -8,9 +8,18 @@ from torch.nn import Parameter
 from torch.utils.data import Dataset
 
 import libs.utils as utils
-from libs.resnet import resnet32
+from libs.modified_resnet import resnet32
 from libs.cifar100 import Cifar100
 from libs.utils import get_one_hot
+from libs.modified_resnet import BiasLayer
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from imblearn.under_sampling import RandomUnderSampler
+
 import copy
 
 
@@ -18,6 +27,9 @@ class ExemplarSet(Dataset):
 
     def __init__(self, images, labels, transforms):
         assert len(images) == len(labels)
+        labels = np.array(labels)
+        assert np.sum(labels == labels[0]) == len(labels)
+
         self.images = list(images)
         self.labels = list(labels)
         self.transforms = transforms
@@ -38,7 +50,7 @@ class ExemplarSet(Dataset):
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda'):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, classifier='fc', device='cuda'):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
@@ -47,7 +59,7 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net = resnet32(num_classes=num_classes)
+        self.net = resnet32(num_classes=num_classes, classifier=classifier)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
@@ -56,11 +68,19 @@ class iCaRLModel(nn.Module):
         self.compute_means = True
         self.exemplar_means = []
 
+        self.clf = None  # cache classifiers object (SVM, KNN...) to test them
+        # multiple times without fitting it at each test
+        # (if no training in the meanwhile)
+        # key: 'svm' or 'knn', value: the fitted classifier
+
     def forward(self, x):
         return self.net(x)
 
-    def _extract_features(self, images):
-        return self.net(images, features=True)
+    def _extract_features(self, images, normalize=True):
+        features = self.net(images, features=True)
+        if normalize:
+            features = features / features.norm(dim=1).unsqueeze(1)
+        return features
 
     def increment_known_classes(self, n_new_classes=10):
         self.known_classes += n_new_classes
@@ -68,10 +88,10 @@ class iCaRLModel(nn.Module):
     def combine_trainset_exemplars(self, train_dataset: Cifar100):
         exemplar_indexes = np.hstack(self.exemplar_sets)
         images, labels = self.dataset.get_items_of(exemplar_indexes)
-        exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[0])
+        exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[1])
         return utils.create_augmented_dataset(train_dataset, exemplar_dataset)
 
-    def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs):
+    def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs, fit_clf=None):
         self.compute_means = True
         self.net = self.net.to(self.device)
 
@@ -119,10 +139,86 @@ class iCaRLModel(nn.Module):
             print(f"\t\tRESULT EPOCH {epoch + 1}:")
             print(f"\t\t\tTrain Loss: {curr_train_loss} - Train Accuracy: {curr_train_accuracy}\n")
 
+        if fit_clf is not None:
+            self._fit_clf(fit_clf, loader)
+
         return np.mean(train_losses), np.mean(train_accuracies)
 
-    def compute_distillation_loss(self, images, labels, new_outputs):
+    def _fit_clf(self, clf_type, dataloader):
+        if clf_type == 'knn':
+            clf = KNeighborsClassifier(weights="distance")
+            param_grid = {"n_neighbors": [9, 11, 13, 15]}
+        elif clf_type == 'svm':
+            clf = Pipeline(steps=[("scaler", StandardScaler()), ("clf", SVC())])
+            param_grid = {"clf__C": [0.01, 0.1, 1, 10]}
+        else:
+            return
 
+        X, y = [], []
+
+        self.net.eval()
+        with torch.no_grad:
+            for images, labels in dataloader:
+                images = images.to(self.device)
+                y.append(labels)
+                features = self._extract_features(images, normalize=False)
+                X.append(features)
+
+            X = torch.cat(X).cpu().numpy()
+            y = torch.cat(y).cpu().numpy()
+
+        rus = RandomUnderSampler()
+        X, y = rus.fit_resample(X, y)
+        grid_search = GridSearchCV(clf, param_grid=param_grid, n_jobs=-1, scoring='accuracy', cv=4)
+        grid_search.fit(X, y)
+        self.clf = grid_search.best_estimator_
+
+
+    #https://github.com/sairin1202/BIC/blob/master/trainer.py
+    """
+    def _bias_training(self):
+
+        bias_optimizer = optim.Adam(self.bias_layer.parameters(), lr=0.001)
+        inc_i = int(len(self.exemplar_sets) / 10)
+        # Training of the bias layer
+        if inc_i > 0:
+            net.train(False)
+            print(f'Training Bias {inc_i}')
+            current_step = 0
+            epochs = 20
+            scheduler_bias = optim.lr_scheduler.MultiStepLR(bias_optimizer, milestones=MILESTONES, gamma=GAMMA,
+                                                            last_epoch=-1)
+            for epoch in range(epochs):
+                print('Starting epoch {}/{}, LR = {}'.format(epoch + 1, epochs, scheduler_bias.get_last_lr()))
+
+                # Iterate over the dataset
+                for images, labels in eval_dataloader:
+                    # Bring data over the device of choice
+                    images = images.to(DEVICE)
+                    labels = labels.to(DEVICE)
+                    net.train()
+
+                    bias_optimizer.zero_grad()  # Zero-ing the gradients
+
+                    # Forward pass to the network and to the bias layer
+                    outputs = net(images)
+                    outputs = self.bias_forward(outputs, len(self.exemplar_sets))
+
+                    # One hot encoding labels for binary cross-entropy loss
+                    labels_onehot = nn.functional.one_hot(labels, 100).type_as(outputs)
+
+                    loss = criterion(outputs, labels_onehot)
+
+                    if current_step % 10 == 0:
+                        print('Step {}, Loss {}'.format(current_step, loss.item()))
+
+                    loss.backward()  # backward pass: computes gradients
+                    bias_optimizer.step()  # update weights based on accumulated gradients
+                    current_step += 1
+            scheduler_bias.step()
+    """
+
+    def compute_distillation_loss(self, images, labels, new_outputs):
         if self.known_classes == 0:
             return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
 
@@ -139,36 +235,88 @@ class iCaRLModel(nn.Module):
     def classify(self, images, method='nearest-mean'):
         self.net = self.net.to(self.device)
         self.net.eval()
-        if method == 'nearest-mean':
+        if method == 'nme':
             return self._nme(images)
+        elif method == 'cosine':
+            return self._cosine_similarity(images)
+        elif method == 'knn' or method == 'svm':
+            return self._knn_svm(images)
+        elif method == 'bias':
+            return self._bias_correction(images)
         elif method == 'fc':
             outputs = self.net(images)
             _, preds = torch.max(outputs.data, 1)
             return preds
 
+    """
+    def bias_forward(self, inp, n):
+        
+        #forward as detailed in the paper:
+        #apply the bias correction only to the new classes
+        
+        out_old = inp[:, :n]
+        out_new = inp[:, n:]
+        out_new = self.bias_layer(out_new)
+        return torch.cat([out_old, out_new], dim=1)
+
+    def _bias_correction(self, images):
+        self.bias_layer = BiasLayer().to(DEVICE)
+
+        self.eval()
+        with torch.no_grad():
+            net = self.net.eval()
+            preds = net(images)
+            preds = self.bias_layer(preds).argmax(dim=-1)
+            return preds
+    """
+
+    def _compute_means(self):
+        exemplar_means = []
+        for exemplar_class_idx in self.exemplar_sets:
+            imgs, labs = self.dataset.get_items_of(exemplar_class_idx)
+            exemplars = ExemplarSet(imgs, labs, utils.get_train_eval_transforms()[1])
+            loader = utils.get_eval_loader(exemplars, self.batch_size)
+
+            flatten_features = []
+            with torch.no_grad():
+                for imgs, _ in loader:
+                    imgs = imgs.to(self.device)
+                    features = self._extract_features(imgs)
+                    flatten_features.append(features)
+
+                flatten_features = torch.cat(flatten_features).to(self.device)
+                class_mean = flatten_features.mean(0)
+                class_mean = class_mean / class_mean.norm()
+                exemplar_means.append(class_mean)
+
+        self.compute_means = False
+        self.exemplar_means = exemplar_means
+
+    def _cosine_similarity(self, images):
+        if self.compute_means:
+            self._compute_means()
+
+        with torch.no_grad():
+            similarity = torch.nn.CosineSimilarity(dim=1)
+
+            exemplar_means = self.exemplar_means
+            means = torch.stack(exemplar_means)  # (n_classes, feature_size)
+            means = torch.stack([means] * len(images))  # (batch_size, n_classes, feature_size)
+            means = means.transpose(1, 2)  # (batch_size, feature_size, n_classes)
+
+            with torch.no_grad():
+                feature = self._extract_features(images, normalize=True)
+                feature = feature.unsqueeze(2)  # (batch_size, feature_size, 1)
+                feature = feature.expand_as(means)  # (batch_size, feature_size, n_classes)
+
+                dists = similarity(feature, means).squeeze()  # (batch_size, n_classes)
+                _, preds = dists.max(1)
+
+        return preds
+
     def _nme(self, images):
         if self.compute_means:
-            exemplar_means = []
-            for exemplar_class_idx in self.exemplar_sets:
-                imgs, labs = self.dataset.get_items_of(exemplar_class_idx)
-                exemplars = ExemplarSet(imgs, labs, utils.get_train_eval_transforms()[1])
-                loader = utils.get_eval_loader(exemplars, self.batch_size)
-
-                flatten_features = []
-                with torch.no_grad():
-                    for imgs, _ in loader:
-                        imgs = imgs.to(self.device)
-                        features = self._extract_features(imgs)
-                        flatten_features.append(features)
-
-                    flatten_features = torch.cat(flatten_features).cpu().numpy()
-                    class_mean = np.mean(flatten_features, axis=0)
-                    class_mean = class_mean / np.linalg.norm(class_mean)
-                    class_mean = torch.from_numpy(class_mean).to(self.device)
-                    exemplar_means.append(class_mean)
-
-            self.compute_means = False
-            self.exemplar_means = exemplar_means
+            self._compute_means()
 
         exemplar_means = self.exemplar_means
         means = torch.stack(exemplar_means)  # (n_classes, feature_size)
@@ -184,6 +332,15 @@ class iCaRLModel(nn.Module):
             _, preds = dists.min(1)
 
         return preds
+
+    def _knn_svm(self, images):
+        assert self.clf is not None
+
+        with torch.no_grad:
+            features = self._extract_features(images, normalize=False).cpu()
+            preds = np.array(self.clf.predict(features))
+
+        return torch.from_numpy(preds)
 
     def reduce_exemplar_set(self, m, label):
         # for i, exemplar_set in enumerate(self.exemplar_sets):
