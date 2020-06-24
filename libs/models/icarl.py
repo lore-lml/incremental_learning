@@ -94,10 +94,10 @@ class iCaRLModel(nn.Module):
             outputs = self.net(images)
             _, preds = torch.max(outputs.data, 1)
             return preds
-        elif method == 'knn':
+        elif method == 'other_classifiers':
             return self._k_nearest_neighbours(images)
         else:
-            raise ValueError("method must be one of 'nearest-mean', 'fc', 'knn', 'svm'")
+            raise ValueError("method must be one of 'nearest-mean', 'fc', 'other_classifiers', 'svm'")
 
     def _nearest_mean(self, images, device):
         means = self.compute_exemplars_means(device)

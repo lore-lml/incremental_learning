@@ -74,7 +74,7 @@ class iCaRLModel(nn.Module):
         self.clf = None  # cache classifiers object (SVM, KNN...) to test them
         # multiple times without fitting it at each test
         # (if no training in the meanwhile)
-        # key: 'svm' or 'knn', value: the fitted classifier
+        # key: 'svm' or 'other_classifiers', value: the fitted classifier
         self.params_clf = []
 
     def forward(self, x):
@@ -92,7 +92,7 @@ class iCaRLModel(nn.Module):
     def combine_trainset_exemplars(self, train_dataset: Cifar100):
         exemplar_indexes = np.hstack(self.exemplar_sets)
         images, labels = self.dataset.get_items_of(exemplar_indexes)
-        exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[1])
+        exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[0])
         return utils.create_augmented_dataset(train_dataset, exemplar_dataset)
 
     def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs, fit_clf=None):
@@ -143,13 +143,15 @@ class iCaRLModel(nn.Module):
             print(f"\t\tRESULT EPOCH {epoch + 1}:")
             print(f"\t\t\tTrain Loss: {curr_train_loss} - Train Accuracy: {curr_train_accuracy}\n")
 
-        if fit_clf is not None:
+        if fit_clf in ['other_classifiers', 'svm']:
             self._fit_clf(fit_clf, loader)
+        elif fit_clf == 'cosine':
+            self.params_clf.append(self.net.get_sigma())
 
         return np.mean(train_losses), np.mean(train_accuracies)
 
     def _fit_clf(self, clf_type, dataloader):
-        if clf_type == 'knn':
+        if clf_type == 'other_classifiers':
             clf = KNeighborsClassifier(weights="distance")
             param_grid = {"n_neighbors": [9, 11, 13, 15]}
         elif clf_type == 'svm':
@@ -245,7 +247,7 @@ class iCaRLModel(nn.Module):
             return self._nme(images)
         elif method == 'cosine':
             return self._cosine_similarity(images)
-        elif method == 'knn' or method == 'svm':
+        elif method == 'other_classifiers' or method == 'svm':
             return self._knn_svm(images)
         elif method == 'bias':
             return self._bias_correction(images)

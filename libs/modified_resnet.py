@@ -237,6 +237,9 @@ class ResNet(nn.Module):
 
         return x
 
+    def get_sigma(self):
+        if self.classifier == 'cosine':
+            return self.fc.sigma.cpu().data.numpy()
 
 def resnet32(**kwargs):
     n = 5
