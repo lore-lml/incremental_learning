@@ -3,9 +3,10 @@ from typing import Iterator
 import torch
 import numpy as np
 import torch.nn as nn
+from torch.utils.data import Subset
 from PIL import Image
 from torch.nn import Parameter
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 import libs.utils as utils
 from libs.modified_resnet import resnet32
@@ -18,6 +19,7 @@ from sklearn.svm import SVC
 from sklearn.model_selection import GridSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
 from imblearn.under_sampling import RandomUnderSampler
 
 import copy
@@ -92,20 +94,49 @@ class iCaRLModel(nn.Module):
     def increment_known_classes(self, n_new_classes=10):
         self.known_classes += n_new_classes
 
-    def combine_trainset_exemplars(self, train_dataset: Cifar100):
+    def combine_trainset_exemplars(self, train_dataset):
         exemplar_indexes = np.hstack(self.exemplar_sets)
         images, labels = self.dataset.get_items_of(exemplar_indexes)
         exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[0])
         return utils.create_augmented_dataset(train_dataset, exemplar_dataset)
 
-    def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs, fit_clf=None):
+    def train_val_dataset_for_bias(self, train_dataset):
+        exemplars_indexes = np.hstack(self.exemplar_sets)
+        exemplars_labels = np.hstack([
+            [label] * len(self.exemplar_sets[label])
+            for label in range(len(self.exemplar_sets))
+        ])
+        exemplar_train_ind, exemplar_val_ind = train_test_split(exemplars_indexes, stratify=exemplars_labels, test_size=500)
+
+        train_dataset_ind = train_dataset.indices
+        _, train_dataset_labels = self.dataset.get_items_of(train_dataset_ind)
+        train_dataset_ind, val_dataset_ind = train_test_split(train_dataset_ind, stratify=train_dataset_labels, test_size=500)
+
+        exemplar_train_imgs, exemplar_train_labels = self.dataset.get_items_of(exemplar_train_ind)
+        exemplar_val_imgs, exemplar_val_labels = self.dataset.get_items_of(exemplar_val_ind)
+
+        train_dataset = Subset(self.dataset, train_dataset_ind)
+        val_dataset = Subset(self.dataset, val_dataset_ind)
+        exemplar_train_set = ExemplarSet(exemplar_train_imgs, exemplar_train_labels, utils.get_train_eval_transforms()[0])
+        exemplar_val_set = ExemplarSet(exemplar_val_imgs, exemplar_val_labels, utils.get_train_eval_transforms()[0])
+
+        train_dataset = utils.create_augmented_dataset(train_dataset, exemplar_train_set)
+        val_dataset = utils.create_augmented_dataset(val_dataset, exemplar_val_set)
+
+        return train_dataset, val_dataset
+
+    def update_representation(self, train_dataset, optimizer, scheduler, num_epochs, fit_clf=None):
         self.compute_means = True
         self.net = self.net.to(self.device)
 
+        val_dataset = None
         if len(self.exemplar_sets) > 0:
             self.old_net = copy.deepcopy(self.net)
             self.old_net = self.old_net.to(self.device)
-            train_dataset = self.combine_trainset_exemplars(train_dataset)
+            if self.bias_layer is None:
+                train_dataset = self.combine_trainset_exemplars(train_dataset)
+            else:
+                train_dataset, val_dataset = self.train_val_dataset_for_bias(train_dataset)
 
         loader = utils.get_train_loader(train_dataset, self.batch_size, drop_last=False)
 
@@ -151,6 +182,11 @@ class iCaRLModel(nn.Module):
         elif fit_clf == 'cosine':
             self.params_clf.append(self.net.get_sigma())
 
+        # Training bias layer if present
+        if val_dataset is not None:
+            val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True, drop_last=False)
+            self._bias_training(val_loader)
+
         return np.mean(train_losses), np.mean(train_accuracies)
 
     def _fit_clf(self, clf_type, dataloader):
@@ -187,8 +223,10 @@ class iCaRLModel(nn.Module):
 
     # https://github.com/sairin1202/BIC/blob/master/trainer.py
 
-    def _bias_training(self, bias_optimizer, scheduler_bias, eval_dataloader):
-
+    def _bias_training(self, eval_dataloader):
+        args = utils.get_arguments()
+        bias_optimizer = torch.optim.Adam(self.bias_layer.parameters(), lr=0.001)
+        scheduler_bias = torch.optim.lr_scheduler.MultiStepLR(bias_optimizer, milestones=[13], gamma=args['GAMMA'], last_epoch=-1)
         criterion = self.criterion_bias
 
         if self.known_classes == 0:
@@ -255,8 +293,8 @@ class iCaRLModel(nn.Module):
             return preds
 
     def bias_forward(self, inp, n):
-        #forward as detailed in the paper:
-        #apply the bias correction only to the new classes
+        # forward as detailed in the paper:
+        # apply the bias correction only to the new classes
 
         out_old = inp[:, :n]
         out_new = inp[:, n:]
@@ -399,4 +437,3 @@ class iCaRLModel(nn.Module):
 
     def parameters(self, recurse: bool = ...) -> Iterator[Parameter]:
         return self.net.parameters()
-
