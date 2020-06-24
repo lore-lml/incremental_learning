@@ -148,7 +148,7 @@ class CosineLayer(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, parameters, use_exemplars, classifier='fc', num_classes=10, k=5000):
+    def __init__(self, block, layers, parameters=None, use_exemplars=None, classifier='fc', num_classes=10, k=5000):
 
         super(ResNet, self).__init__()
 

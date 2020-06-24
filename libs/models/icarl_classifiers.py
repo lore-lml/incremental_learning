@@ -27,8 +27,6 @@ class ExemplarSet(Dataset):
 
     def __init__(self, images, labels, transforms):
         assert len(images) == len(labels)
-        labels = np.array(labels)
-        assert np.sum(labels == labels[0]) == len(labels)
 
         self.images = list(images)
         self.labels = list(labels)
@@ -50,7 +48,8 @@ class ExemplarSet(Dataset):
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, classifier='fc', device='cuda'):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, classifier='fc',
+                 device='cuda'):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
@@ -76,6 +75,7 @@ class iCaRLModel(nn.Module):
         # multiple times without fitting it at each test
         # (if no training in the meanwhile)
         # key: 'svm' or 'knn', value: the fitted classifier
+        self.params_clf = []
 
     def forward(self, x):
         return self.net(x)
@@ -163,7 +163,7 @@ class iCaRLModel(nn.Module):
         X, y = [], []
 
         self.net.eval()
-        with torch.no_grad:
+        with torch.no_grad():
             for images, labels in dataloader:
                 images = images.to(self.device)
                 y.append(labels)
@@ -178,9 +178,9 @@ class iCaRLModel(nn.Module):
         grid_search = GridSearchCV(clf, param_grid=param_grid, n_jobs=-1, scoring='accuracy', cv=4)
         grid_search.fit(X, y)
         self.clf = grid_search.best_estimator_
+        self.params_clf.append(grid_search.best_params_)
 
-
-    #https://github.com/sairin1202/BIC/blob/master/trainer.py
+    # https://github.com/sairin1202/BIC/blob/master/trainer.py
     """
     def _bias_training(self):
 
@@ -256,10 +256,10 @@ class iCaRLModel(nn.Module):
 
     """
     def bias_forward(self, inp, n):
-        
+
         #forward as detailed in the paper:
         #apply the bias correction only to the new classes
-        
+
         out_old = inp[:, :n]
         out_new = inp[:, n:]
         out_new = self.bias_layer(out_new)
@@ -342,11 +342,11 @@ class iCaRLModel(nn.Module):
     def _knn_svm(self, images):
         assert self.clf is not None
 
-        with torch.no_grad:
+        with torch.no_grad():
             features = self._extract_features(images, normalize=False).cpu()
             preds = np.array(self.clf.predict(features))
 
-        return torch.from_numpy(preds)
+        return torch.from_numpy(preds).to(self.device)
 
     def reduce_exemplar_set(self, m, label):
         # for i, exemplar_set in enumerate(self.exemplar_sets):
