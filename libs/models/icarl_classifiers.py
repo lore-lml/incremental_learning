@@ -22,6 +22,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 from imblearn.under_sampling import RandomUnderSampler
 
+from libs.ablationstudy_losses import ClassificationDistillationLosses
+
 import copy
 
 
@@ -51,9 +53,10 @@ class ExemplarSet(Dataset):
 class iCaRLModel(nn.Module):
 
     def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, classifier='fc',
-                 device='cuda'):
+                 device='cuda', class_loss=None, dist_loss=None, class_batch_size=10):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
+        self.class_batch_size = class_batch_size
         self.memory = memory
         self.known_classes = 0
         self.old_net = None
@@ -66,6 +69,11 @@ class iCaRLModel(nn.Module):
             self.net = resnet32(num_classes=num_classes)
 
         self.dataset = train_dataset
+
+        if class_loss is None and dist_loss is None:
+            self.loss_computer = None
+        else:
+            self.loss_computer = ClassificationDistillationLosses(class_loss, dist_loss)
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
         self.exemplar_sets = []
@@ -130,7 +138,7 @@ class iCaRLModel(nn.Module):
         val_dataset = None
         if len(self.exemplar_sets) > 0:
             self.old_net = copy.deepcopy(self.net)
-            self.old_net = self.old_net.to(self.device)
+            self.old_net = self.old_net.to(self.device).eval()
             if self.bias_layer is None:
                 train_dataset = self.combine_trainset_exemplars(train_dataset)
             else:
@@ -156,7 +164,7 @@ class iCaRLModel(nn.Module):
                 _, preds = torch.max(outputs.data, 1)
                 running_corrects += torch.sum(preds == labels.data).data.item()
 
-                loss = self.compute_distillation_loss(images, labels, outputs)
+                loss = self.compute_loss(images, labels, outputs)
                 loss_value = loss.item()
                 cumulative_loss += loss_value
 
@@ -265,7 +273,24 @@ class iCaRLModel(nn.Module):
                     current_step += 1
                 scheduler_bias.step()
 
-    def compute_distillation_loss(self, images, labels, new_outputs):
+    def compute_loss(self, images, labels, new_outputs):
+        self.old_net.eval()
+        if self.loss_computer is None:
+            return self._compute_distillation_loss(images, labels, new_outputs)
+        else:
+            class_ratio = self.class_batch_size / (self.class_batch_size + self.known_classes)
+            labels = utils.get_one_hot(labels, self.num_classes, self.device)
+            class_inputs = new_outputs[:, self.known_classes:]
+            class_targets = labels[:, self.known_classes:]
+            if self.known_classes == 0:
+                dist_inputs = None
+                dist_targets = None
+            else:
+                dist_inputs = self.old_net(images)[:, :self.known_classes]
+                dist_targets = labels[:, :self.known_classes]
+            return self.loss_computer(class_inputs, class_targets, dist_inputs, dist_targets, class_ratio)
+
+    def _compute_distillation_loss(self, images, labels, new_outputs):
         if self.known_classes == 0:
             return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
 

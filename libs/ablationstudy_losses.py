@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-
 def _compute_cross_entropy_loss(input, target):
     input = torch.log_softmax(input, dim=1)
     loss = torch.sum(input * target, dim=1, keepdim=False)
@@ -33,13 +32,6 @@ def _compute_hinton_loss(input, target):
 # bce with hard target: classification loss in iCaRL
 def _compute_bce_loss(input, target):
     crit = nn.BCEWithLogitsLoss(reduction="mean")
-    return crit(input, target)
-
-
-# bce with soft targets: distillation loss as described in iCaRL
-def _compute_soft_bce_loss(input, target):
-    crit = nn.BCEWithLogitsLoss(reduction="mean")
-    target = nn.Sigmoid()(target)
     return crit(input, target)
 
 
@@ -76,13 +68,13 @@ def _compute_lfc_loss(input, target):
 
 # the CustomizedLoss compute a loss made by 2 terms:
 # a [classification] and a [distillation] term
-class _Classification_Distillation_Losses():
-    def __init__(self, classification, distillation):
+class ClassificationDistillationLosses:
+    def __init__(self, classification, distillation, num_classes=100):
+        self.num_classes = num_classes
         self.classification = classification
         self.distillation = distillation
         self.loss_computer = {
             "bce": _compute_bce_loss,
-            "icarl": _compute_soft_bce_loss,
             "ce": _compute_cross_entropy_loss,
             "icarl_ce": _compute_soft_cross_entropy_loss,
             "hinton": _compute_hinton_loss,
@@ -93,12 +85,7 @@ class _Classification_Distillation_Losses():
         }
 
     def __call__(self, class_input, class_target, dist_input, dist_target, class_ratio):
-        # need this to handle the variation case, when normally the class_loss is "icarl"
-        # but in the first step is "bce"
-        if self.classification == "icarl" and dist_input is None:
-            class_loss = self.loss_computer["bce"](class_input, class_target)
-        else:
-            class_loss = self.loss_computer[self.classification](class_input, class_target)
+        class_loss = self.loss_computer[self.classification](class_input, class_target)
 
         if self.distillation is not None and dist_input is not None and dist_target is not None:
             if self.distillation == "lfc":
