@@ -87,6 +87,8 @@ class iCaRLModel(nn.Module):
         if classifier == 'bias':
             self.criterion_bias = nn.BCEWithLogitsLoss(reduction='mean')
             self.bias_layer = BiasLayer().to(device)
+        else:
+            self.bias_layer = None
 
     def forward(self, x):
         return self.net(x)
@@ -138,7 +140,8 @@ class iCaRLModel(nn.Module):
         val_dataset = None
         if len(self.exemplar_sets) > 0:
             self.old_net = copy.deepcopy(self.net)
-            self.old_net = self.old_net.to(self.device).eval()
+            self.old_net = self.old_net.to(self.device)
+            self.old_net.eval()
             if self.bias_layer is None:
                 train_dataset = self.combine_trainset_exemplars(train_dataset)
             else:
@@ -174,7 +177,7 @@ class iCaRLModel(nn.Module):
                 if i != 0 and i % 20 == 0:
                     print(f"\t\tEpoch {epoch + 1}: Train_loss = {loss_value}")
 
-            curr_train_loss = cumulative_loss / float(len(train_dataset))
+            curr_train_loss = cumulative_loss / float(len(loader))
             curr_train_accuracy = running_corrects / float(len(train_dataset))
             train_losses.append(curr_train_loss)
             train_accuracies.append(curr_train_accuracy)
@@ -274,20 +277,19 @@ class iCaRLModel(nn.Module):
                 scheduler_bias.step()
 
     def compute_loss(self, images, labels, new_outputs):
-        self.old_net.eval()
         if self.loss_computer is None:
             return self._compute_distillation_loss(images, labels, new_outputs)
         else:
             class_ratio = self.class_batch_size / (self.class_batch_size + self.known_classes)
             labels = utils.get_one_hot(labels, self.num_classes, self.device)
-            class_inputs = new_outputs[:, self.known_classes:]
-            class_targets = labels[:, self.known_classes:]
+            class_inputs = new_outputs
+            class_targets = labels
             if self.known_classes == 0:
                 dist_inputs = None
                 dist_targets = None
             else:
-                dist_inputs = self.old_net(images)[:, :self.known_classes]
-                dist_targets = labels[:, :self.known_classes]
+                dist_inputs = self.old_net(images)
+                dist_targets = labels
             return self.loss_computer(class_inputs, class_targets, dist_inputs, dist_targets, class_ratio)
 
     def _compute_distillation_loss(self, images, labels, new_outputs):
@@ -307,7 +309,7 @@ class iCaRLModel(nn.Module):
     def classify(self, images, method='nearest-mean'):
         self.net = self.net.to(self.device)
         self.net.eval()
-        if method == 'nme':
+        if method == 'nearest-mean':
             return self._nme(images)
         elif method == 'cosine':
             return self._cosine_similarity(images)
@@ -319,6 +321,8 @@ class iCaRLModel(nn.Module):
             outputs = self.net(images)
             _, preds = torch.max(outputs.data, 1)
             return preds
+        else:
+            raise ValueError("invalid method")
 
     def bias_forward(self, inp, n):
         # forward as detailed in the paper:
