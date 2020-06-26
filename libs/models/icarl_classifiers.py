@@ -63,7 +63,7 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        if classifier == 'cosine':
+        if classifier == 'cosine' or classifier == 'wa':
             self.net = resnet32(num_classes=num_classes, classifier=classifier)
         else:
             self.net = resnet32(num_classes=num_classes)
@@ -313,8 +313,10 @@ class iCaRLModel(nn.Module):
             return self._nme(images)
         elif method == 'cosine':
             return self._cosine_similarity(images)
-        elif method == 'other_classifiers' or method == 'svm':
+        elif method == 'knn' or method == 'svm':
             return self._knn_svm(images)
+        elif method == "wa":
+            return self._wa_fairness(images)
         elif method == 'bias':
             return self._bias_correction(images)
         elif method == 'fc':
@@ -323,6 +325,11 @@ class iCaRLModel(nn.Module):
             return preds
         else:
             raise ValueError("invalid method")
+
+    def _wa_fairness(self, images):
+        if self.known_classes > 0:
+            self.net.weight_align(int(self.known_classes/10))
+        return self.classify(images,method="fc")
 
     def bias_forward(self, inp, n):
         # forward as detailed in the paper:

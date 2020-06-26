@@ -7,6 +7,7 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 import torch.optim as optim
 import torch.utils.model_zoo as model_zoo
 
@@ -110,6 +111,52 @@ class BiasLayer(nn.Module):
     def printParam(self, i):
         print(i, self.alpha.item(), self.beta.item())
 
+class WALinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(WALinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.sub_num_classes = self.out_features // 5
+        self.WA_linears = nn.ModuleList()
+        self.WA_linears.extend(
+            [nn.Linear(self.in_features, self.sub_num_classes, bias=False) for i in range(5)])
+
+    def forward(self, x):
+        out1 = self.WA_linears[0](x)
+        out2 = self.WA_linears[1](x)
+        out3 = self.WA_linears[2](x)
+        out4 = self.WA_linears[3](x)
+        out5 = self.WA_linears[4](x)
+
+        return torch.cat([out1, out2, out3, out4, out5], dim=1)
+
+    def align_norms(self, step_b):
+        # Fetch old and new layers
+        new_layer = self.WA_linears[step_b]
+        old_layers = self.WA_linears[:step_b]
+
+        # Get weight of layers
+        new_weight = new_layer.weight.cpu().detach().numpy()
+        for i in range(step_b):
+            old_weight = np.concatenate([old_layers[i].weight.cpu().detach().numpy() for i in range(step_b)])
+        #print("old_weight's shape is: ", old_weight.shape)
+        #print("new_weight's shape is: ", new_weight.shape)
+
+        # Calculate the norm
+        Norm_of_new = np.linalg.norm(new_weight, axis=1)
+        Norm_of_old = np.linalg.norm(old_weight, axis=1)
+        assert (len(Norm_of_new) == 20)
+        assert (len(Norm_of_old) == step_b * 20)
+
+        # Calculate the Gamma
+        gamma = np.mean(Norm_of_new) / np.mean(Norm_of_old)
+        #print("Gamma = ", gamma)
+
+        # Update new layer's weight
+        updated_new_weight = torch.Tensor(gamma * new_weight).cuda()
+        #print(updated_new_weight)
+        self.WA_linears[step_b].weight = torch.nn.Parameter(updated_new_weight)
+
 
 class CosineLayer(nn.Module):
 
@@ -179,6 +226,8 @@ class ResNet(nn.Module):
 
         if classifier == 'cosine':
             self.fc = CosineLayer(64 * block.expansion, num_classes)
+        elif classifier == 'wa':
+            self.fc = WALinear(64 * block.expansion, num_classes)
         else:
             self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -240,6 +289,10 @@ class ResNet(nn.Module):
     def get_sigma(self):
         if self.classifier == 'cosine':
             return self.fc.sigma.cpu().data.numpy()
+
+    def weight_align(self, step_b):
+        self.fc.align_norms(step_b)
+
 
 def resnet32(**kwargs):
     n = 5
