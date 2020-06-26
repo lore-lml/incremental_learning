@@ -173,7 +173,7 @@ class ExemplarGenerator(nn.Module):
         data = self._build_data_dict(features, labels)
         self._compute_mean_std(data, override)
 
-    def _generate_features(self, labels, n_features):
+    def generate_features(self, labels, n_features):
         import random
         features = []
         label_tensor = []
@@ -182,18 +182,16 @@ class ExemplarGenerator(nn.Module):
             sigma = self.mean_std[label]['std']
             shape = (n_features, len(mu))
             features.append(np.random.normal(mu, sigma, shape))
-            label_tensor.append([label] * len(mu))
+            label_tensor.append([label] * n_features)
 
         label_tensor = np.hstack(label_tensor)
         features = np.vstack(features)
         features = np.array(features, dtype=np.float32)
 
-        return torch.from_numpy(features).to(self.device), \
-               torch.from_numpy(np.array(label_tensor)).to(self.device)
+        return torch.from_numpy(features).to(self.device), torch.from_numpy(np.array(label_tensor)).to(self.device)
 
-    def forward(self, labels, n_features):
-        features, labels = self._generate_features(labels, n_features)
-        return self.fc(features), labels
+    def forward(self, features):
+        return self.fc(features)
 
 
 def resnet32(device, **kwargs):

@@ -112,23 +112,18 @@ class BiasLayer(nn.Module):
         print(i, self.alpha.item(), self.beta.item())
 
 class WALinear(nn.Module):
-    def __init__(self, in_features, out_features):
+    def __init__(self, in_features, out_features, num_batch=10):
         super(WALinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.sub_num_classes = self.out_features // 5
+        self.sub_num_classes = self.out_features // num_batch
         self.WA_linears = nn.ModuleList()
         self.WA_linears.extend(
-            [nn.Linear(self.in_features, self.sub_num_classes, bias=False) for i in range(5)])
+            [nn.Linear(self.in_features, self.sub_num_classes, bias=False) for i in range(num_batch)])
 
     def forward(self, x):
-        out1 = self.WA_linears[0](x)
-        out2 = self.WA_linears[1](x)
-        out3 = self.WA_linears[2](x)
-        out4 = self.WA_linears[3](x)
-        out5 = self.WA_linears[4](x)
-
-        return torch.cat([out1, out2, out3, out4, out5], dim=1)
+        outs = [lin(x) for lin in self.WA_linears]
+        return torch.cat(outs, dim=1)
 
     def align_norms(self, step_b):
         # Fetch old and new layers
@@ -145,8 +140,8 @@ class WALinear(nn.Module):
         # Calculate the norm
         Norm_of_new = np.linalg.norm(new_weight, axis=1)
         Norm_of_old = np.linalg.norm(old_weight, axis=1)
-        assert (len(Norm_of_new) == 20)
-        assert (len(Norm_of_old) == step_b * 20)
+        assert (len(Norm_of_new) == 10)
+        assert (len(Norm_of_old) == step_b * 10)
 
         # Calculate the Gamma
         gamma = np.mean(Norm_of_new) / np.mean(Norm_of_old)
