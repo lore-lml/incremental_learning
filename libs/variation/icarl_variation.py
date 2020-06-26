@@ -47,7 +47,7 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net, self.generator = resnet32(device=device, num_classes=num_classes)
+        self.net, self.generator = resnet32(device, num_classes=num_classes)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
@@ -102,13 +102,15 @@ class iCaRLModel(nn.Module):
 
                 optimizer.zero_grad()
                 outputs = self.net(images)
-                if self.known_classes > 0:
-                    generated_outputs, generated_labels = self.generator(np.arange(self.known_classes), m)
-                    outputs = torch.cat(outputs, generated_outputs)
-                    labels = torch.cat(labels, generated_labels)
 
                 _, preds = torch.max(outputs.data, 1)
                 running_corrects += torch.sum(preds == labels.data).data.item()
+                if self.known_classes > 0:
+                    generated_outputs, generated_labels = self.generator(np.arange(self.known_classes), m)
+                    print(generated_outputs.shape)
+                    print(generated_labels.shape)
+                    outputs = torch.cat([outputs, generated_outputs], dim=0)
+                    labels = torch.cat([labels, generated_labels])
 
                 loss = self.compute_distillation_loss(images, labels, outputs)
                 loss_value = loss.item()

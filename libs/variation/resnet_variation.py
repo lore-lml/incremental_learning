@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch
 import numpy as np
+
 """
 Credits to @hshustc
 Taken from https://github.com/hshustc/CVPR19_Incremental_Learning/tree/master/cifar100-class-incremental
@@ -147,15 +148,16 @@ class ResNet(nn.Module):
 class ExemplarGenerator(nn.Module):
 
     def __init__(self, fc, device='cuda'):
-        super(ExemplarGenerator).__init__()
+        super(ExemplarGenerator, self).__init__()
         self.fc = fc
         self.device = device
         self.mean_std = {}
 
     def _build_data_dict(self, features, labels):
-        data = {}
+        data = dict()
         for label, feat in zip(labels, features):
-            data[label] = data.get(label, []).append(feat)
+            data[label] = data.get(label, [])
+            data[label].append(feat)
         return data
 
     def _compute_mean_std(self, data, override=True):
@@ -172,24 +174,30 @@ class ExemplarGenerator(nn.Module):
         self._compute_mean_std(data, override)
 
     def _generate_features(self, labels, n_features):
+        import random
         features = []
+        label_tensor = []
         for label in labels:
             mu = self.mean_std[label]['mean']
             sigma = self.mean_std[label]['std']
             shape = (n_features, len(mu))
             features.append(np.random.normal(mu, sigma, shape))
+            label_tensor.append([label] * len(mu))
 
+        label_tensor = np.hstack(label_tensor)
         features = np.vstack(features)
-        return torch.from_numpy(features).to(self.device)
+        features = np.array(features, dtype=np.float32)
+
+        return torch.from_numpy(features).to(self.device), \
+               torch.from_numpy(np.array(label_tensor)).to(self.device)
 
     def forward(self, labels, n_features):
-        features = self._generate_features(labels, n_features)
-        return self.fc(features), torch.from_numpy(np.array(labels)).to(self.device)
+        features, labels = self._generate_features(labels, n_features)
+        return self.fc(features), labels
 
 
-def resnet32(**kwargs):
+def resnet32(device, **kwargs):
     n = 5
     model = ResNet(BasicBlock, [n, n, n], **kwargs)
-    device = kwargs['device'] if 'device' in kwargs else 'cuda'
     generator = ExemplarGenerator(model.fc, device)
     return model, generator
