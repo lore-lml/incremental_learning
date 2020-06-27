@@ -130,6 +130,10 @@ class WALinear(nn.Module):
         new_layer = self.WA_linears[step_b]
         old_layers = self.WA_linears[:step_b]
 
+        # Freeze the last old layer
+        for par in old_layers[step_b-1].parameters():
+            par.requires_grad = False
+
         # Get weight of layers
         new_weight = new_layer.weight.cpu().detach().numpy()
         for i in range(step_b):

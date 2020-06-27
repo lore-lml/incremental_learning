@@ -88,7 +88,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=100):
+    def __init__(self, block, layers, num_classes=100, classifier='fc'):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -99,7 +99,11 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
         self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
         self.avgpool = nn.AvgPool2d(8, stride=1)
-        self.fc = nn.Linear(64 * block.expansion, num_classes)
+
+        if classifier == 'pl':
+            self.fc = ProgressiveLinear(64 * block.expansion, num_classes)
+        else:
+            self.fc = nn.Linear(64 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -192,6 +196,48 @@ class ExemplarGenerator(nn.Module):
 
     def forward(self, features):
         return self.fc(features)
+
+
+class ProgressiveLinear(nn.Module):
+    def __init__(self, in_features, out_features, num_batch=10):
+        super(ProgressiveLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.sub_num_classes = self.out_features // num_batch
+        self.WA_linears = nn.ModuleList()
+        self.WA_linears.extend(
+            [nn.Linear(self.in_features, self.sub_num_classes, bias=False) for i in range(num_batch)])
+
+    def forward(self, x):
+        outs = [lin(x) for lin in self.WA_linears]
+        return torch.cat(outs, dim=1)
+
+    def align_norms(self, step_b):
+        # Fetch old and new layers
+        new_layer = self.WA_linears[step_b]
+        old_layers = self.WA_linears[:step_b]
+
+        # Get weight of layers
+        new_weight = new_layer.weight.cpu().detach().numpy()
+        for i in range(step_b):
+            old_weight = np.concatenate([old_layers[i].weight.cpu().detach().numpy() for i in range(step_b)])
+        #print("old_weight's shape is: ", old_weight.shape)
+        #print("new_weight's shape is: ", new_weight.shape)
+
+        # Calculate the norm
+        Norm_of_new = np.linalg.norm(new_weight, axis=1)
+        Norm_of_old = np.linalg.norm(old_weight, axis=1)
+        assert (len(Norm_of_new) == 10)
+        assert (len(Norm_of_old) == step_b * 10)
+
+        # Calculate the Gamma
+        gamma = np.mean(Norm_of_new) / np.mean(Norm_of_old)
+        #print("Gamma = ", gamma)
+
+        # Update new layer's weight
+        updated_new_weight = torch.Tensor(gamma * new_weight).cuda()
+        #print(updated_new_weight)
+        self.WA_linears[step_b].weight = torch.nn.Parameter(updated_new_weight)
 
 
 def resnet32(device, **kwargs):
