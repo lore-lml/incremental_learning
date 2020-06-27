@@ -38,7 +38,7 @@ class ExemplarSet(Dataset):
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda', layer='fc'):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda', layer='fc', gamma_method='single'):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
@@ -47,10 +47,11 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net = resnet_progressive_layers(num_classes=num_classes, classifier="pl", layer_type=layer)
+        self.net = resnet_progressive_layers(num_classes=num_classes, classifier="pl", layer_type=layer, gamma_method=gamma_method)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
+        #self.bce_loss = nn.CrossEntropyLoss()
         self.exemplar_sets = []
 
         self.compute_means = True
@@ -116,7 +117,7 @@ class iCaRLModel(nn.Module):
                 if i != 0 and i % 20 == 0:
                     print(f"\t\tEpoch {epoch + 1}: Train_loss = {loss_value}")
 
-            curr_train_loss = cumulative_loss / float(len(train_dataset))
+            curr_train_loss = cumulative_loss / float(len(loader))
             curr_train_accuracy = running_corrects / float(len(train_dataset))
             train_losses.append(curr_train_loss)
             train_accuracies.append(curr_train_accuracy)
@@ -129,6 +130,7 @@ class iCaRLModel(nn.Module):
 
     def compute_loss(self, labels, new_outputs):
         return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
+        #return self.bce_loss(new_outputs, labels)
 
     def _compute_means(self):
         exemplar_means = []

@@ -93,7 +93,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear'):
+    def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear', gamma_method='single'):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -111,7 +111,7 @@ class ResNet(nn.Module):
         self.avgpool = nn.AvgPool2d(8, stride=1)
 
         if classifier == 'pl':
-            self.fc = ProgressiveWALayer(64 * block.expansion, num_classes, layer_type=layer_type)
+            self.fc = ProgressiveWALayer(64 * block.expansion, num_classes, layer_type=layer_type, gamma_method=gamma_method)
         else:
             self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -221,8 +221,12 @@ class ExemplarGenerator(nn.Module):
 
 class ProgressiveWALayer(nn.Module):
 
-    def __init__(self, in_features, out_features, layer_type='linear'):
+    def __init__(self, in_features, out_features, layer_type='linear', gamma_method='single'):
         super(ProgressiveWALayer, self).__init__()
+        if gamma_method not in ['single', 'multi']:
+            raise ValueError("gamma must be single or multi")
+
+        self.gamma_method = gamma_method
         self.in_features = in_features
         self.out_features = out_features
 
@@ -248,16 +252,39 @@ class ProgressiveWALayer(nn.Module):
         self.weights_per_batch.append(weights)
 
         if step > 0:
-            w_to_norm = np.vstack(self.weights_per_batch[:start_batch])
-            norm_old = np.linalg.norm(w_to_norm, axis=1)
-            norm_new = np.linalg.norm(weights, axis=1)
-            gamma = norm_old.mean() / norm_new.mean()
+            if self.gamma_method == 'multi':
+                self._multi_gamma(step)
+            else:
+                w_to_norm = np.vstack(self.weights_per_batch[:step])
+                norm_old = np.linalg.norm(w_to_norm, axis=1)
+                norm_new = np.linalg.norm(weights, axis=1)
+                gamma = norm_old.mean() / norm_new.mean()
 
-            old_w = self.classifier.weight.cpu().detach().numpy()
-            old_w[:start_batch] = gamma * old_w[:start_batch]
-            new_w = Parameter(torch.Tensor(old_w).cuda())
+                old_w = self.classifier.weight.cpu().detach().numpy()
+                old_w[:start_batch] = gamma * old_w[:start_batch]
+                new_w = Parameter(torch.Tensor(old_w).cuda())
 
-            self.classifier.weight = new_w
+                self.classifier.weight = new_w
+
+    def _multi_gamma(self, step):
+        new_weights = self.weights_per_batch[-1]  # the lasts weights of kth batch
+        norm_new = np.linalg.norm(new_weights, axis=1)
+        mean_new = norm_new.mean()
+
+        new_w = []
+        old_w = self.classifier.weight.cpu().detach().numpy()
+        for i in range(step):
+            w = self.weights_per_batch[i]
+            norm_old = np.linalg.norm(w, axis=1)
+            gamma = norm_old.mean() / mean_new
+
+            start_batch = i*10
+            end_batch = (i+1)*10
+            new_w.append(gamma * old_w[start_batch: end_batch])
+
+        new_w = np.vstack(new_w)
+        new_w = Parameter(torch.Tensor(new_w).cuda())
+        self.classifier.weight[:step*10] = new_w
 
 
 def cosine_layer(in_features, out_features, sigma=True):
