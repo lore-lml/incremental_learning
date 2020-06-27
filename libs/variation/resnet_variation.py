@@ -283,8 +283,10 @@ class ProgressiveWALayer(nn.Module):
             new_w.append(gamma * old_w[start_batch: end_batch])
 
         new_w = np.vstack(new_w)
-        new_w = Parameter(torch.Tensor(new_w).cuda())
-        self.classifier.weight[:step*10] = new_w
+        old_w[:step*10] = new_w
+        updated_w = old_w
+        updated_w = Parameter(torch.Tensor(updated_w).cuda())
+        self.classifier.weight = updated_w
 
 
 def cosine_layer(in_features, out_features, sigma=True):
