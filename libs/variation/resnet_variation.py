@@ -1,7 +1,10 @@
 import torch.nn as nn
 import torch
 import numpy as np
+import math
 
+from torch.nn import Parameter
+import torch.nn.functional as F
 """
 Credits to @hshustc
 Taken from https://github.com/hshustc/CVPR19_Incremental_Learning/tree/master/cifar100-class-incremental
@@ -88,7 +91,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=100, classifier='fc'):
+    def __init__(self, block, layers, num_classes=100, classifier=None, layer='fc'):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -97,11 +100,16 @@ class ResNet(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.layer1 = self._make_layer(block, 16, layers[0])
         self.layer2 = self._make_layer(block, 32, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
+        if classifier == 'cosine':
+            # a downsample layer (conv1x1) is added in the first BasicBlock to adjust
+            # input to the output lower dimension caused by stride=2
+            self.layer3 = self._make_layer(block, 64, layers[2], stride=2, last_phase=True)
+        else:
+            self.layer3 = self._make_layer(block, 64, layers[2], stride=2)
         self.avgpool = nn.AvgPool2d(8, stride=1)
 
         if classifier == 'pl':
-            self.fc = ProgressiveLinear(64 * block.expansion, num_classes)
+            self.fc = ProgressiveLayer(64 * block.expansion, num_classes)
         else:
             self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -112,8 +120,10 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def _make_layer(self, block, planes, blocks, stride=1):
+    def _make_layer(self, block, planes, blocks, stride=1, last_phase=False):
+
         downsample = None
+
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 nn.Conv2d(self.inplanes, planes * block.expansion,
@@ -124,8 +134,14 @@ class ResNet(nn.Module):
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample))
         self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+
+        if last_phase:
+            for i in range(1, blocks - 1):
+                layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, last=True))
+        else:
+            for i in range(1, blocks):
+                layers.append(block(self.inplanes, planes))
 
         return nn.Sequential(*layers)
 
@@ -198,24 +214,34 @@ class ExemplarGenerator(nn.Module):
         return self.fc(features)
 
 
-class ProgressiveLinear(nn.Module):
-    def __init__(self, in_features, out_features, num_batch=10):
-        super(ProgressiveLinear, self).__init__()
+class ProgressiveLayer(nn.Module):
+
+    def __init__(self, in_features, out_features, num_batch=10, layer_type='linear'):
+        super(ProgressiveLayer, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.sub_num_classes = self.out_features // num_batch
-        self.WA_linears = nn.ModuleList()
-        self.WA_linears.extend(
-            [nn.Linear(self.in_features, self.sub_num_classes, bias=False) for i in range(num_batch)])
+
+        if layer_type not in ['linear', 'cosine']:
+            raise ValueError("layer_type must be linear or cosine")
+        self.create_layer = linear_layer if layer_type == 'linear' else cosine_layer
+        self.PL_layers = nn.ModuleList()
+        self.PL_layers.extend(
+            [self.create_layer(self.in_features, self.sub_num_classes) for i in range(num_batch)]
+        )
 
     def forward(self, x):
-        outs = [lin(x) for lin in self.WA_linears]
+        outs = [lin(x) for lin in self.PL_layers]
         return torch.cat(outs, dim=1)
 
     def align_norms(self, step_b):
         # Fetch old and new layers
-        new_layer = self.WA_linears[step_b]
-        old_layers = self.WA_linears[:step_b]
+        new_layer = self.PL_layers[step_b]
+        old_layers = self.PL_layers[:step_b]
+
+        # Freeze the last old layer
+        for par in old_layers[step_b-1].parameters():
+            par.requires_grad = False
 
         # Get weight of layers
         new_weight = new_layer.weight.cpu().detach().numpy()
@@ -237,7 +263,51 @@ class ProgressiveLinear(nn.Module):
         # Update new layer's weight
         updated_new_weight = torch.Tensor(gamma * new_weight).cuda()
         #print(updated_new_weight)
-        self.WA_linears[step_b].weight = torch.nn.Parameter(updated_new_weight)
+        self.PL_layers[step_b].weight = torch.nn.Parameter(updated_new_weight)
+
+
+def cosine_layer(in_features, out_features, sigma=True):
+    return CosineLayer(in_features, out_features, sigma=sigma)
+
+
+def linear_layer(in_features, out_features, bias=False):
+    return nn.Linear(in_features, out_features, bias=bias)
+
+
+class CosineLayer(nn.Module):
+
+    def __init__(self, in_features, out_features, sigma=True):
+        super(CosineLayer, self).__init__()
+
+        #Layer dimensions
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.Tensor(out_features, in_features))
+
+        # Sigma parameter
+        self.sigma = Parameter(torch.Tensor(1)) if sigma else None
+
+        # Reset layer parameter
+        self.reset_parameters()
+
+    def reset_parameters(self):
+
+        std = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-std, std)
+
+        if self.sigma is not None:
+            self.sigma.data.fill_(1)
+
+    def forward(self, input):
+
+        # Compute output
+        out = F.linear(F.normalize(input, p=2, dim=1), F.normalize(self.weight, p=2, dim=1))
+
+        # Scale by sigma if set
+        if self.sigma is not None:
+            out = self.sigma * out
+
+        return out
 
 
 def resnet32(device, **kwargs):
@@ -245,3 +315,8 @@ def resnet32(device, **kwargs):
     model = ResNet(BasicBlock, [n, n, n], **kwargs)
     generator = ExemplarGenerator(model.fc, device)
     return model, generator
+
+
+def resnet_progressive_layers(**kwargs):
+    n = 5
+    return ResNet(BasicBlock, [n, n, n], **kwargs)

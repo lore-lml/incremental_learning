@@ -8,7 +8,7 @@ from torch.nn import Parameter
 from torch.utils.data import Dataset
 
 import libs.utils as utils
-from libs.variation.resnet_variation import resnet32
+from libs.variation.resnet_variation import resnet_progressive_layers
 from libs.cifar100 import Cifar100
 from libs.utils import get_one_hot
 import copy
@@ -38,7 +38,7 @@ class ExemplarSet(Dataset):
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda'):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda', layer='fc'):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
@@ -47,7 +47,7 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net, self.generator = resnet32(device, num_classes=num_classes)
+        self.net, self.generator = resnet_progressive_layers(num_classes=num_classes, classifier="pl", layer=layer)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
@@ -87,15 +87,12 @@ class iCaRLModel(nn.Module):
 
         train_losses = []
         train_accuracies = []
-        tmp_criterion = nn.BCEWithLogitsLoss(reduction='mean')
         for epoch in range(num_epochs):
             print(f"\tSTARTING EPOCH {epoch + 1} - LR={scheduler.get_last_lr()}...")
             cumulative_loss = .0
             running_corrects = 0
             self.net.train()
 
-            if self.known_classes > 0:
-                m = 500 - int(self.memory / self.known_classes)
             for i, (images, labels) in enumerate(loader):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
@@ -105,23 +102,11 @@ class iCaRLModel(nn.Module):
 
                 _, preds = torch.max(outputs.data, 1)
                 running_corrects += torch.sum(preds == labels.data).data.item()
-                generated_features = None
-                if self.known_classes > 0:
-                    generated_features, generated_labels = self.generator\
-                        .generate_features(np.arange(self.known_classes), m)
-                    generated_outputs = self.generator(generated_features)
-                    """outputs = torch.cat([outputs, generated_outputs], dim=0)
-                    labels = torch.cat([labels, generated_labels])"""
-                    tmp_loss = tmp_criterion(generated_outputs, get_one_hot(generated_labels, self.num_classes, self.device))
-                else:
-                    tmp_loss = None
 
-                loss = self.compute_distillation_loss(images, labels, outputs, None)
+                loss = self.compute_distillation_loss(labels, outputs)
                 loss_value = loss.item()
                 cumulative_loss += loss_value
 
-                if tmp_loss is not None:
-                    loss += tmp_loss
                 loss.backward()
                 optimizer.step()
 
@@ -139,20 +124,17 @@ class iCaRLModel(nn.Module):
 
         return np.mean(train_losses), np.mean(train_accuracies)
 
-    def compute_distillation_loss(self, images, labels, new_outputs, generated_features):
+    def compute_distillation_loss(self, labels, new_outputs):
 
         if self.known_classes == 0:
             return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
 
         sigmoid = nn.Sigmoid()
         n_old_classes = self.known_classes
-        old_outputs = self.old_net(images)
-        if generated_features is not None:
-            generated_old_outputs = self.old_net.fc(generated_features)
-            old_outputs = torch.cat([old_outputs, generated_old_outputs], dim=0)
+        old_outputs = new_outputs[:n_old_classes]
 
         targets = get_one_hot(labels, self.num_classes, self.device)
-        targets[:, :n_old_classes] = sigmoid(old_outputs)[:, :n_old_classes]
+        targets[:, :n_old_classes] = sigmoid(old_outputs)
         tot_loss = self.bce_loss(new_outputs, targets)
 
         return tot_loss
