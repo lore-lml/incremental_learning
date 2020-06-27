@@ -56,6 +56,8 @@ class iCaRLModel(nn.Module):
         self.compute_means = True
         self.exemplar_means = []
 
+        self.has_to_normalize = True  # for weight alignment
+
     def forward(self, x):
         return self.net(x)
 
@@ -76,6 +78,7 @@ class iCaRLModel(nn.Module):
 
     def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs):
         self.compute_means = True
+        self.has_to_normalize = True
         self.net = self.net.to(self.device)
 
         if len(self.exemplar_sets) > 0:
@@ -144,10 +147,19 @@ class iCaRLModel(nn.Module):
         self.net.eval()
         if method == 'nearest-mean':
             return self._nme(images)
+        elif method == "wa":
+            return self._weight_norm(images)
         elif method == 'fc':
             outputs = self.net(images)
             _, preds = torch.max(outputs.data, 1)
             return preds
+
+    def _weight_norm(self,images):
+        step = int(self.known_classes / 10) - 1
+        if self.has_to_normalize and step > 0:
+            self.net.weight_align(step)
+            self.has_to_normalize = False
+        return self.classify(images, method="nearest-mean")
 
     def _nme(self, images):
         if self.compute_means:

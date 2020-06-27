@@ -164,6 +164,9 @@ class ResNet(nn.Module):
 
         return x
 
+    def weight_align(self, step_b):
+        self.fc.align_norms(step_b)
+
 
 class ExemplarGenerator(nn.Module):
 
