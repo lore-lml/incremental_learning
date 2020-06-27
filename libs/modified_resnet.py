@@ -144,7 +144,7 @@ class WALinear(nn.Module):
         assert (len(Norm_of_old) == step_b * 10)
 
         # Calculate the Gamma
-        gamma = np.mean(Norm_of_new) / np.mean(Norm_of_old)
+        gamma = np.mean(Norm_of_old) / np.mean(Norm_of_new)
         #print("Gamma = ", gamma)
 
         # Update new layer's weight

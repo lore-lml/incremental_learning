@@ -5,6 +5,8 @@ import math
 
 from torch.nn import Parameter
 import torch.nn.functional as F
+
+import copy
 """
 Credits to @hshustc
 Taken from https://github.com/hshustc/CVPR19_Incremental_Learning/tree/master/cifar100-class-incremental
@@ -91,7 +93,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=100, classifier=None, layer='fc'):
+    def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear'):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -109,7 +111,7 @@ class ResNet(nn.Module):
         self.avgpool = nn.AvgPool2d(8, stride=1)
 
         if classifier == 'pl':
-            self.fc = ProgressiveLayer(64 * block.expansion, num_classes)
+            self.fc = ProgressiveWALayer(64 * block.expansion, num_classes, layer_type=layer_type)
         else:
             self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -165,7 +167,7 @@ class ResNet(nn.Module):
         return x
 
     def weight_align(self, step_b):
-        self.fc.align_norms(step_b)
+        self.fc.store_and_align_weights_before_classify(step_b)
 
 
 class ExemplarGenerator(nn.Module):
@@ -217,56 +219,45 @@ class ExemplarGenerator(nn.Module):
         return self.fc(features)
 
 
-class ProgressiveLayer(nn.Module):
+class ProgressiveWALayer(nn.Module):
 
-    def __init__(self, in_features, out_features, num_batch=10, layer_type='linear'):
-        super(ProgressiveLayer, self).__init__()
+    def __init__(self, in_features, out_features, layer_type='linear'):
+        super(ProgressiveWALayer, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.sub_num_classes = self.out_features // num_batch
 
         if layer_type not in ['linear', 'cosine']:
             raise ValueError("layer_type must be linear or cosine")
+        # function to create layers based on layer_type
         self.create_layer = linear_layer if layer_type == 'linear' else cosine_layer
-        self.PL_layers = nn.ModuleList()
-        self.PL_layers.extend(
-            [self.create_layer(self.in_features, self.sub_num_classes) for i in range(num_batch)]
-        )
+        # classifier used to train net during i_th stage
+        self.classifier = self.create_layer(in_features, out_features)
 
-    def forward(self, x):
-        outs = [lin(x) for lin in self.PL_layers]
-        return torch.cat(outs, dim=1)
+        # Storing memory for the old classifiers
+        #self.PL_layers = nn.ModuleList()
+        self.weights_per_batch = []
 
-    def align_norms(self, step_b):
-        # Fetch old and new layers
-        new_layer = self.PL_layers[step_b]
-        old_layers = self.PL_layers[:step_b]
+    def forward(self, features):
+        return self.classifier(features)
 
-        # Freeze the last old layer
-        for par in old_layers[step_b-1].parameters():
-            par.requires_grad = False
+    def store_and_align_weights_before_classify(self, step):
+        assert step < 10
+        start_batch = step*10
+        end_batch = (step+1)*10
+        weights = self.classifier.weight.cpu().detach().numpy()[start_batch: end_batch]
+        self.weights_per_batch.append(weights)
 
-        # Get weight of layers
-        new_weight = new_layer.weight.cpu().detach().numpy()
-        for i in range(step_b):
-            old_weight = np.concatenate([old_layers[i].weight.cpu().detach().numpy() for i in range(step_b)])
-        #print("old_weight's shape is: ", old_weight.shape)
-        #print("new_weight's shape is: ", new_weight.shape)
+        if step > 0:
+            w_to_norm = np.vstack(self.weights_per_batch[:start_batch])
+            norm_old = np.linalg.norm(w_to_norm, axis=1)
+            norm_new = np.linalg.norm(weights, axis=1)
+            gamma = norm_old.mean() / norm_new.mean()
 
-        # Calculate the norm
-        Norm_of_new = np.linalg.norm(new_weight, axis=1)
-        Norm_of_old = np.linalg.norm(old_weight, axis=1)
-        assert (len(Norm_of_new) == 10)
-        assert (len(Norm_of_old) == step_b * 10)
+            old_w = self.classifier.weight.cpu().detach().numpy()
+            old_w[:start_batch] = gamma * old_w[:start_batch]
+            new_w = Parameter(torch.Tensor(old_w).cuda())
 
-        # Calculate the Gamma
-        gamma = np.mean(Norm_of_new) / np.mean(Norm_of_old)
-        #print("Gamma = ", gamma)
-
-        # Update new layer's weight
-        updated_new_weight = torch.Tensor(gamma * new_weight).cuda()
-        #print(updated_new_weight)
-        self.PL_layers[step_b].weight = torch.nn.Parameter(updated_new_weight)
+            self.classifier.weight = new_w
 
 
 def cosine_layer(in_features, out_features, sigma=True):
