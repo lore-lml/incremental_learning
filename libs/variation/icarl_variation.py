@@ -110,13 +110,11 @@ class iCaRLModel(nn.Module):
                     generated_features, generated_labels = self.generator\
                         .generate_features(np.arange(self.known_classes), m)
                     generated_outputs = self.generator(generated_features)
-                    """outputs = torch.cat([outputs, generated_outputs], dim=0)
-                    labels = torch.cat([labels, generated_labels])"""
                     tmp_loss = tmp_criterion(generated_outputs, get_one_hot(generated_labels, self.num_classes, self.device))
                 else:
                     tmp_loss = None
 
-                loss = self.compute_distillation_loss(images, labels, outputs, None)
+                loss = self.compute_distillation_loss(images, labels, outputs)
                 loss_value = loss.item()
                 cumulative_loss += loss_value
 
@@ -139,7 +137,7 @@ class iCaRLModel(nn.Module):
 
         return np.mean(train_losses), np.mean(train_accuracies)
 
-    def compute_distillation_loss(self, images, labels, new_outputs, generated_features):
+    def compute_distillation_loss(self, images, labels, new_outputs):
 
         if self.known_classes == 0:
             return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
@@ -147,9 +145,6 @@ class iCaRLModel(nn.Module):
         sigmoid = nn.Sigmoid()
         n_old_classes = self.known_classes
         old_outputs = self.old_net(images)
-        if generated_features is not None:
-            generated_old_outputs = self.old_net.fc(generated_features)
-            old_outputs = torch.cat([old_outputs, generated_old_outputs], dim=0)
 
         targets = get_one_hot(labels, self.num_classes, self.device)
         targets[:, :n_old_classes] = sigmoid(old_outputs)[:, :n_old_classes]
