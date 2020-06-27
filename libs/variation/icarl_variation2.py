@@ -38,7 +38,8 @@ class ExemplarSet(Dataset):
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda', layer='fc', gamma_method='single'):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128,
+                 device='cuda', layer='fc', gamma_method='single', restore=False):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
@@ -47,7 +48,8 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net = resnet_progressive_layers(num_classes=num_classes, classifier="pl", layer_type=layer, gamma_method=gamma_method)
+        self.net = resnet_progressive_layers(num_classes=num_classes, classifier="pl",
+                                             layer_type=layer, gamma_method=gamma_method, restore=restore)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')

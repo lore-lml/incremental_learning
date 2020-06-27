@@ -93,7 +93,7 @@ class Bottleneck(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear', gamma_method='single'):
+    def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear', gamma_method='single', restore=False):
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -111,7 +111,7 @@ class ResNet(nn.Module):
         self.avgpool = nn.AvgPool2d(8, stride=1)
 
         if classifier == 'pl':
-            self.fc = ProgressiveWALayer(64 * block.expansion, num_classes, layer_type=layer_type, gamma_method=gamma_method)
+            self.fc = ProgressiveWALayer(64 * block.expansion, num_classes, layer_type=layer_type, gamma_method=gamma_method, restore=restore)
         else:
             self.fc = nn.Linear(64 * block.expansion, num_classes)
 
@@ -225,7 +225,7 @@ class ExemplarGenerator(nn.Module):
 
 class ProgressiveWALayer(nn.Module):
 
-    def __init__(self, in_features, out_features, layer_type='linear', gamma_method='single'):
+    def __init__(self, in_features, out_features, layer_type='linear', gamma_method='single', restore=False):
         super(ProgressiveWALayer, self).__init__()
         if gamma_method not in ['single', 'multi']:
             raise ValueError("gamma must be single or multi")
@@ -291,6 +291,19 @@ class ProgressiveWALayer(nn.Module):
         updated_w = old_w
         updated_w = Parameter(torch.Tensor(updated_w).cuda())
         self.classifier.weight = updated_w
+
+    def restore_weights_before_training(self, step):
+        if step <= 1:
+            return
+
+        old_w = self.classifier.weight.cpu().detach().numpy()
+        restored_w = self.weights_per_batch[:step]
+        restored_w = np.vstack(restored_w)
+        old_w[:step] = restored_w
+
+        updated_w = Parameter(torch.Tensor(old_w).cuda())
+        self.classifier.weight = updated_w
+
 
 
 def cosine_layer(in_features, out_features, sigma=True):
