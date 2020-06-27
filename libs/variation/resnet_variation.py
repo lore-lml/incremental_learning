@@ -199,7 +199,6 @@ class ExemplarGenerator(nn.Module):
         self._compute_mean_std(data, override)
 
     def generate_features(self, labels, n_features):
-        import random
         features = []
         label_tensor = []
         for label in labels:
@@ -211,7 +210,12 @@ class ExemplarGenerator(nn.Module):
 
         label_tensor = np.hstack(label_tensor)
         features = np.vstack(features)
+
+        union = zip(features, labels)
+        np.random.shuffle(union)
+        features, label_tensor = zip(*union)
         features = np.array(features, dtype=np.float32)
+        label_tensor = np.array(label_tensor)
 
         return torch.from_numpy(features).to(self.device), torch.from_numpy(np.array(label_tensor)).to(self.device)
 
