@@ -90,6 +90,8 @@ class iCaRLModel(nn.Module):
         else:
             self.bias_layer = None
 
+        self.has_to_normalize = True  # for weight alignment
+
     def forward(self, x):
         return self.net(x)
 
@@ -114,18 +116,21 @@ class iCaRLModel(nn.Module):
             [label] * len(self.exemplar_sets[label])
             for label in range(len(self.exemplar_sets))
         ])
-        exemplar_train_ind, exemplar_val_ind = train_test_split(exemplars_indexes, stratify=exemplars_labels, test_size=500)
+        exemplar_train_ind, exemplar_val_ind = train_test_split(exemplars_indexes, stratify=exemplars_labels,
+                                                                test_size=500)
 
         train_dataset_ind = train_dataset.indices
         _, train_dataset_labels = self.dataset.get_items_of(train_dataset_ind)
-        train_dataset_ind, val_dataset_ind = train_test_split(train_dataset_ind, stratify=train_dataset_labels, test_size=500)
+        train_dataset_ind, val_dataset_ind = train_test_split(train_dataset_ind, stratify=train_dataset_labels,
+                                                              test_size=500)
 
         exemplar_train_imgs, exemplar_train_labels = self.dataset.get_items_of(exemplar_train_ind)
         exemplar_val_imgs, exemplar_val_labels = self.dataset.get_items_of(exemplar_val_ind)
 
         train_dataset = Subset(self.dataset, train_dataset_ind)
         val_dataset = Subset(self.dataset, val_dataset_ind)
-        exemplar_train_set = ExemplarSet(exemplar_train_imgs, exemplar_train_labels, utils.get_train_eval_transforms()[0])
+        exemplar_train_set = ExemplarSet(exemplar_train_imgs, exemplar_train_labels,
+                                         utils.get_train_eval_transforms()[0])
         exemplar_val_set = ExemplarSet(exemplar_val_imgs, exemplar_val_labels, utils.get_train_eval_transforms()[0])
 
         train_dataset = utils.create_augmented_dataset(train_dataset, exemplar_train_set)
@@ -135,6 +140,7 @@ class iCaRLModel(nn.Module):
 
     def update_representation(self, train_dataset, optimizer, scheduler, num_epochs, fit_clf=None):
         self.compute_means = True
+        self.has_to_normalize = True
         self.net = self.net.to(self.device)
 
         val_dataset = None
@@ -327,9 +333,11 @@ class iCaRLModel(nn.Module):
             raise ValueError("invalid method")
 
     def _wa_fairness(self, images):
-        if self.known_classes > 0:
-            self.net.weight_align(int(self.known_classes/10))
-        return self.classify(images,method="fc")
+        step = int(self.known_classes / 10) - 1
+        if self.has_to_normalize and step > 0:
+            self.net.weight_align(step)
+            self.has_to_normalize = False
+        return self.classify(images, method="fc")
 
     def bias_forward(self, inp, n):
         # forward as detailed in the paper:

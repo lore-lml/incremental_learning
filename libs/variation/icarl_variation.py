@@ -95,7 +95,7 @@ class iCaRLModel(nn.Module):
             self.net.train()
 
             if self.known_classes > 0:
-                m = 300 - int(self.memory / self.known_classes)
+                m = 500 - int(self.memory / self.known_classes)
             for i, (images, labels) in enumerate(loader):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
@@ -233,7 +233,7 @@ class iCaRLModel(nn.Module):
 
             # storing features to calculate mean and std
             not_normalized_features = torch.cat(not_normalized_features).cpu().numpy()
-            self.generator.add_data(not_normalized_features, [label]*not_normalized_features.shape[0])
+            #self.generator.add_data(not_normalized_features, [label]*not_normalized_features.shape[0])
 
             # computing mean per class
             flatten_features = torch.cat(flatten_features).cpu().numpy()
@@ -244,6 +244,7 @@ class iCaRLModel(nn.Module):
 
         exemplars = set()  # lista di exemplars selezionati per la classe corrente
         exemplar_feature = []  # lista di features per ogni exemplars già selezionato
+        feature_to_generalize = []
         for k in range(m):
             S = 0 if k == 0 else torch.stack(exemplar_feature).sum(0)
             phi = flatten_features
@@ -257,10 +258,12 @@ class iCaRLModel(nn.Module):
                 if indexes[i] not in exemplars:
                     exemplars.add(indexes[i])
                     exemplar_feature.append(flatten_features[i])
+                    feature_to_generalize.append(not_normalized_features[i])
                     break
 
         assert len(exemplars) == m
         self.exemplar_sets.append(list(exemplars))
+        self.generator.add_data(feature_to_generalize, [label]*len(feature_to_generalize))
 
     def random_construct_exemplar_set(self, indexes, label, m):
         choices = np.arange(len(indexes))
