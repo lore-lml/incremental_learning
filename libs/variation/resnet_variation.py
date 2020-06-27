@@ -216,7 +216,7 @@ class ExemplarGenerator(nn.Module):
         label_tensor = np.hstack(label_tensor)
         features = np.vstack(features)
 
-        union = zip(features, labels)
+        union = list(zip(features, label_tensor))
         np.random.shuffle(union)
         features, label_tensor = zip(*union)
         features = np.array(features, dtype=np.float32)
@@ -304,7 +304,7 @@ class ProgressiveWALayer(nn.Module):
         old_w = self.classifier.weight.cpu().detach().numpy()
         restored_w = self.weights_per_batch[:step]
         restored_w = np.vstack(restored_w)
-        old_w[:step] = restored_w
+        old_w[:(step-1)*10] = restored_w
 
         updated_w = Parameter(torch.Tensor(old_w).cuda())
         self.classifier.weight = updated_w
