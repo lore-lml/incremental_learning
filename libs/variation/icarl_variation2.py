@@ -89,6 +89,7 @@ class iCaRLModel(nn.Module):
             self.old_net = self.old_net.to(self.device)
             train_dataset = self.combine_trainset_exemplars(train_dataset)
 
+        self.net.restore_if_needed(self.known_classes // 10)
         loader = utils.get_train_loader(train_dataset, self.batch_size, drop_last=False)
 
         train_losses = []

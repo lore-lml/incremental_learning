@@ -94,6 +94,7 @@ class Bottleneck(nn.Module):
 class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=100, classifier=None, layer_type='linear', gamma_method='single', restore=False):
+        self.restore = restore
         self.inplanes = 16
         super(ResNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1,
@@ -168,6 +169,10 @@ class ResNet(nn.Module):
 
     def weight_align(self, step_b):
         self.fc.store_and_align_weights_before_classify(step_b)
+
+    def restore_if_needed(self, step):
+        if self.restore:
+            self.fc.restore_weights_before_training(step)
 
 
 class ExemplarGenerator(nn.Module):
