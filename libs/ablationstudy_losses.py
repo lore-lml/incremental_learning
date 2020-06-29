@@ -4,16 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+
 def _compute_cross_entropy_loss(input, target):
     input = torch.log_softmax(input, dim=1)
-    loss = torch.sum(input * target, dim=1, keepdim=False)
-    loss = -torch.mean(loss, dim=0, keepdim=False)
-    return loss
-
-
-def _compute_soft_cross_entropy_loss(input, target):
-    input = torch.log_softmax(input, dim=1)
-    target = torch.nn.Sigmoid()(target)
     loss = torch.sum(input * target, dim=1, keepdim=False)
     loss = -torch.mean(loss, dim=0, keepdim=False)
     return loss
@@ -49,12 +42,6 @@ def _compute_l2_loss(input, target):
     return crit(input, target)
 
 
-def _compute_l2_hard_loss(input, target):
-    input = nn.Sigmoid()(input)
-    crit = nn.MSELoss(reduction='mean')
-    return crit(input, target)
-
-
 # loss described in the "Learning a Unified Classifier Incrementally via Rebalancing"
 # measures the cosine similarity of the previous and new features representation (normalized)
 # lfc = less forget constraint
@@ -76,12 +63,10 @@ class ClassificationDistillationLosses:
         self.loss_computer = {
             "bce": _compute_bce_loss,
             "ce": _compute_cross_entropy_loss,
-            "icarl_ce": _compute_soft_cross_entropy_loss,
             "hinton": _compute_hinton_loss,
             "kldiv": _compute_kldiv_loss,
             "lfc": _compute_lfc_loss,
             "l2": _compute_l2_loss,
-            "l2_hard": _compute_l2_hard_loss,
         }
 
     def __call__(self, class_input, class_target, dist_input, dist_target, class_ratio):
