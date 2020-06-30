@@ -1,204 +1,245 @@
-import copy
 from typing import Iterator
 
-import numpy as np
 import torch
+import numpy as np
 import torch.nn as nn
+from PIL import Image
 from torch.nn import Parameter
+from torch.utils.data import Dataset
 
 import libs.utils as utils
 from libs.resnet import resnet32
+from libs.cifar100 import Cifar100
 from libs.utils import get_one_hot
+import copy
+
+
+class ExemplarSet(Dataset):
+
+    def __init__(self, images, labels, transforms):
+        assert len(images) == len(labels)
+        self.images = list(images)
+        self.labels = list(labels)
+        self.transforms = transforms
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, index):
+        img, label = self.images[index], self.labels[index]
+
+        img = Image.fromarray(img)
+
+        if self.transforms is not None:
+            img = self.transforms(img)
+
+        return img, label
 
 
 class iCaRLModel(nn.Module):
 
-    def __init__(self, num_classes=100, memory=2000):
+    def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda'):
         super(iCaRLModel, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
         self.known_classes = 0
         self.old_net = None
+        self.batch_size = batch_size
+        self.device = device
 
         self.net = resnet32(num_classes=num_classes)
+        self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
-        self.exemplar_sets = [{'indexes': [], 'features': []} for label in range(num_classes)]
-        self.compute_means = True
-        self.means = []
-
-    def before_train(self, device):
-        self.net.to(device)
-        if self.old_net is not None:
-            self.old_net.to(device)
-            self.old_net.eval()
+        self.exemplar_sets = []
 
         self.compute_means = True
-        indexes = [diz['indexes'] for diz in self.exemplar_sets[:self.known_classes]]
-        return [] if len(indexes) == 0 else np.hstack(indexes)
+        self.exemplar_means = []
 
-    def after_train(self, class_batch_size, train_subsets_per_class, labels, device, herding=True):
-        self.known_classes += class_batch_size
-        self.old_net = copy.deepcopy(self)
+    def forward(self, x):
+        return self.net(x)
 
-        self.net = self.net.to(device)
+    def _extract_features(self, images):
+        return self.net(images, features=True)
 
-        min_memory = int(self.memory / self.known_classes)
-        class_memories = [min_memory] * self.known_classes
-        empty_memory = self.memory % self.known_classes
-        if empty_memory > 0:
-            for i in range(empty_memory):
-                class_memories[i] += 1
+    def increment_known_classes(self, n_new_classes=10):
+        self.known_classes += n_new_classes
 
-        assert sum(class_memories) == self.memory
+    def combine_trainset_exemplars(self, train_dataset: Cifar100):
+        exemplar_indexes = np.hstack(self.exemplar_sets)
+        images, labels = self.dataset.get_items_of(exemplar_indexes)
+        exemplar_dataset = ExemplarSet(images, labels, utils.get_train_eval_transforms()[0])
+        return utils.create_augmented_dataset(train_dataset, exemplar_dataset)
 
-        for i, m in enumerate(class_memories[: self.known_classes - class_batch_size]):
-            self.reduce_exemplar_set(m, i)
+    def update_representation(self, train_dataset: Cifar100, optimizer, scheduler, num_epochs):
+        self.compute_means = True
+        self.net = self.net.to(self.device)
 
-        for curr_subset, label, m in zip(train_subsets_per_class, labels,
-                                         class_memories[self.known_classes - class_batch_size: self.known_classes]):
-            print(label)
-            self.construct_exemplar_set(curr_subset, label, m, device, herding=herding)
+        if len(self.exemplar_sets) > 0:
+            self.old_net = copy.deepcopy(self.net)
+            self.old_net = self.old_net.to(self.device)
+            train_dataset = self.combine_trainset_exemplars(train_dataset)
 
-    def increment_class(self, num_classes=10):
-        weight = self.net.fc.weight.data
-        bias = self.net.fc.bias.data
-        in_feature = self.net.fc.in_features
-        out_feature = self.net.fc.out_features
+        loader = utils.get_train_loader(train_dataset, self.batch_size, drop_last=False)
 
-        self.net.fc = nn.Linear(in_feature, num_classes, bias=True)
-        self.net.fc.weight.data[:out_feature] = weight
-        self.net.fc.bias.data[:out_feature] = bias
+        train_losses = []
+        train_accuracies = []
 
-    def forward(self, x, features=False):
-        return self.net(x, features)
+        for epoch in range(num_epochs):
+            print(f"\tSTARTING EPOCH {epoch + 1} - LR={scheduler.get_last_lr()}...")
+            cumulative_loss = .0
+            running_corrects = 0
+            self.net.train()
+            for i, (images, labels) in enumerate(loader):
+                images = images.to(self.device)
+                labels = labels.to(self.device)
 
-    def compute_exemplars_means(self, device):
-        if not self.compute_means:
-            return self.means
+                optimizer.zero_grad()
+                outputs = self.net(images)
 
-        self.means = []
-        for diz in self.exemplar_sets[:self.known_classes]:
-            features = torch.stack(diz['features']).to(device)
-            class_mean = features.mean(0)
-            class_mean = class_mean / class_mean.norm()
-            self.means.append(class_mean)
+                _, preds = torch.max(outputs.data, 1)
+                running_corrects += torch.sum(preds == labels.data).data.item()
 
-        self.compute_means = False
-        return torch.stack(self.means).to(device)
+                loss = self.compute_distillation_loss(images, labels, outputs)
+                loss_value = loss.item()
+                cumulative_loss += loss_value
 
-    def classify(self, images, device, method='nearest-mean'):
-        if method == 'nearest-mean':
-            return self._nearest_mean(images, device)
-        elif method == 'fc':
-            outputs = self.net(images)
-            _, preds = torch.max(outputs.data, 1)
-            return preds
-        elif method == 'other_classifiers':
-            return self._k_nearest_neighbours(images)
-        else:
-            raise ValueError("method must be one of 'nearest-mean', 'fc', 'other_classifiers', 'svm'")
+                loss.backward()
+                optimizer.step()
 
-    def _nearest_mean(self, images, device):
-        means = self.compute_exemplars_means(device)
-        targets = torch.zeros(len(images), dtype=torch.int).to(device)
+                if i != 0 and i % 20 == 0:
+                    print(f"\t\tEpoch {epoch + 1}: Train_loss = {loss_value}")
 
-        self.net.eval()
-        with torch.no_grad():
-            features = self._extract_feature(images)
-            for i, feat in enumerate(features):
-                dists = torch.stack([torch.dist(feat, mean) for mean in means]).to(device)
-                targets[i] = int(torch.argmin(dists))
+            curr_train_loss = cumulative_loss / float(len(train_dataset))
+            curr_train_accuracy = running_corrects / float(len(train_dataset))
+            train_losses.append(curr_train_loss)
+            train_accuracies.append(curr_train_accuracy)
+            scheduler.step()
 
-        return targets.to(device)
+            print(f"\t\tRESULT EPOCH {epoch + 1}:")
+            print(f"\t\t\tTrain Loss: {curr_train_loss} - Train Accuracy: {curr_train_accuracy}\n")
 
-    def _k_nearest_neighbours(self, images):
-        self.net.eval()
+        return np.mean(train_losses), np.mean(train_accuracies)
 
-    def compute_distillation_loss(self, images, labels, new_outputs, device, num_classes=10):
+    def compute_distillation_loss(self, images, labels, new_outputs):
 
         if self.known_classes == 0:
-            return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, device))
+            return self.bce_loss(new_outputs, get_one_hot(labels, self.num_classes, self.device))
 
         sigmoid = nn.Sigmoid()
         n_old_classes = self.known_classes
-        # n_new_classes = self.known_classes + num_classes
         old_outputs = self.old_net(images)
 
-        targets = get_one_hot(labels, self.num_classes, device)
+        targets = get_one_hot(labels, self.num_classes, self.device)
         targets[:, :n_old_classes] = sigmoid(old_outputs)[:, :n_old_classes]
         tot_loss = self.bce_loss(new_outputs, targets)
 
         return tot_loss
 
+    def classify(self, images, method='nearest-mean'):
+        self.net = self.net.to(self.device)
+        self.net.eval()
+        if method == 'nearest-mean':
+            return self._nme(images)
+        elif method == 'fc':
+            outputs = self.net(images)
+            _, preds = torch.max(outputs.data, 1)
+            return preds
+
+    def _nme(self, images):
+        if self.compute_means:
+            exemplar_means = []
+            for exemplar_class_idx in self.exemplar_sets:
+                imgs, labs = self.dataset.get_items_of(exemplar_class_idx)
+                exemplars = ExemplarSet(imgs, labs, utils.get_train_eval_transforms()[1])
+                loader = utils.get_eval_loader(exemplars, self.batch_size)
+
+                flatten_features = []
+                with torch.no_grad():
+                    for imgs, _ in loader:
+                        imgs = imgs.to(self.device)
+                        features = self._extract_features(imgs)
+                        flatten_features.append(features)
+
+                    flatten_features = torch.cat(flatten_features).cpu().numpy()
+                    class_mean = np.mean(flatten_features, axis=0)
+                    class_mean = class_mean / np.linalg.norm(class_mean)
+                    class_mean = torch.from_numpy(class_mean).to(self.device)
+                    exemplar_means.append(class_mean)
+
+            self.compute_means = False
+            self.exemplar_means = exemplar_means
+
+        exemplar_means = self.exemplar_means
+        means = torch.stack(exemplar_means)  # (n_classes, feature_size)
+        means = torch.stack([means] * len(images))  # (batch_size, n_classes, feature_size)
+        means = means.transpose(1, 2)  # (batch_size, feature_size, n_classes)
+
+        with torch.no_grad():
+            feature = self._extract_features(images)
+            feature = feature.unsqueeze(2)  # (batch_size, feature_size, 1)
+            feature = feature.expand_as(means)  # (batch_size, feature_size, n_classes)
+
+            dists = (feature - means).pow(2).sum(1).squeeze()  # (batch_size, n_classes)
+            _, preds = dists.min(1)
+
+        return preds
+
+    def reduce_exemplar_set(self, m, label):
+        # for i, exemplar_set in enumerate(self.exemplar_sets):
+        self.exemplar_sets[label] = self.exemplar_sets[label][:m]
+
+    def construct_exemplar_set(self, indexes, images, label, m, herding=True):
+        if herding:
+            self.herding_construct_exemplar_set(indexes, images, label, m)
+        else:
+            self.random_construct_exemplar_set(indexes, label, m)
+
+    def herding_construct_exemplar_set(self, indexes, images, label, m):
+        exemplar_set = ExemplarSet(images, [label] * len(images), utils.get_train_eval_transforms()[1])
+        loader = utils.get_eval_loader(exemplar_set, self.batch_size)
+
+        self.net.eval()
+        flatten_features = []
+        with torch.no_grad():
+            for images, _ in loader:
+                images = images.to(self.device)
+                features = self._extract_features(images)
+                flatten_features.append(features)
+
+            flatten_features = torch.cat(flatten_features).cpu().numpy()
+            class_mean = np.mean(flatten_features, axis=0)
+            class_mean = class_mean / np.linalg.norm(class_mean)
+            # class_mean = torch.from_numpy(class_mean).to(self.device)
+            flatten_features = torch.from_numpy(flatten_features).to(self.device)
+
+        exemplars = set()  # lista di exemplars selezionati per la classe corrente
+        exemplar_feature = []  # lista di features per ogni exemplars già selezionato
+        for k in range(m):
+            S = 0 if k == 0 else torch.stack(exemplar_feature).sum(0)
+            phi = flatten_features
+            mu = class_mean
+            mu_p = ((phi + S) / (k + 1)).cpu().numpy()
+            mu_p = mu_p / np.linalg.norm(mu_p)
+            distances = np.sqrt(np.sum((mu - mu_p) ** 2, axis=1))
+            # Evito che si creino duplicati
+            sorted_indexes = np.argsort(distances)
+            for i in sorted_indexes:
+                if indexes[i] not in exemplars:
+                    exemplars.add(indexes[i])
+                    exemplar_feature.append(flatten_features[i])
+                    break
+
+        assert len(exemplars) == m
+        self.exemplar_sets.append(list(exemplars))
+
+    def random_construct_exemplar_set(self, indexes, label, m):
+        choices = np.arange(len(indexes))
+        exemplars = np.random.choice(choices, m, replace=False)
+
+        assert len(self.exemplar_sets) == label  # si assicura che l'inserimento avvenga nell'ordine corretto
+        self.exemplar_sets.append(exemplars)
+
     def parameters(self, recurse: bool = ...) -> Iterator[Parameter]:
         return self.net.parameters()
 
-    def _extract_feature(self, x):
-        return self.net(x, features=True)
-
-    def construct_exemplar_set(self, single_class_dataset, label, m, device, herding=True):
-        if len(single_class_dataset) < m:
-            raise ValueError("Number of images can't be less than m")
-
-        map_subset_to_cifar = np.array(single_class_dataset.indices)
-        loader = utils.get_eval_loader(single_class_dataset, batch_size=256)
-        features = []
-        if herding:
-            self.net.eval()
-            with torch.no_grad():
-                for images, _ in loader:
-                    images = images.to(device)
-                    feat = self._extract_feature(images)
-                    features.append(feat)
-
-                flatten_features = torch.cat(features).to(device)
-                class_mean = flatten_features.mean(0)
-                class_mean = (class_mean / class_mean.norm()).to(device)
-
-            exemplars_indexes = set()
-            for k in range(m):
-                exemplars = self.exemplar_sets[label]['features']
-
-                if len(exemplars) > 0:
-                    exemplars = torch.stack(exemplars).to(device)
-
-                sum_exemplars = 0 if k == 0 else exemplars.sum(0)
-                mean_exemplars = (flatten_features.to(device) + sum_exemplars) / (k + 1)
-                mean_exemplars = torch.stack([torch.dist(class_mean.to(device), e_sum) for e_sum in mean_exemplars])
-                idxs = torch.argsort(mean_exemplars)
-                min_index = 0
-                for i in idxs:
-                    i = int(i)
-                    if i not in exemplars_indexes:
-                        exemplars_indexes.add(i)
-                        min_index = i
-                        break
-
-                self.exemplar_sets[label]['indexes'].append(map_subset_to_cifar[min_index])
-                self.exemplar_sets[label]['features'].append(flatten_features[min_index].cpu())
-
-        else:
-            self.net.eval()
-            indexes = []
-            with torch.no_grad():
-                for i, (images, _) in enumerate(loader):
-                    choices = np.arange(len(images))
-                    samples = np.random.choice(choices, m, replace=False)
-                    images = images[samples].to(device)
-                    feat = self._extract_feature(images)
-                    features.append(feat)
-                    curr_idx = (i * 256) + samples
-                    curr_idx = [map_subset_to_cifar[i] for i in curr_idx]
-                    indexes.extend(curr_idx)
-
-                flatten_features = torch.cat(features)
-                self.exemplar_sets[label]['indexes'] = indexes
-                self.exemplar_sets[label]['features'] = list(flatten_features)
-
-    def reduce_exemplar_set(self, m, label):
-        if len(self.exemplar_sets[label]['indexes']) < m:
-            raise ValueError(f"m must be lower than current size of current exemplar set for class {label}")
-
-        self.exemplar_sets[label]['indexes'] = self.exemplar_sets[label]['indexes'][:m]
-        self.exemplar_sets[label]['features'] = self.exemplar_sets[label]['features'][:m]

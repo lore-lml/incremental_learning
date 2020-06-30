@@ -8,7 +8,7 @@ from torch.nn import Parameter
 from torch.utils.data import Dataset
 
 import libs.utils as utils
-from libs.resnet import resnet32
+from libs.variation.resnet_variation import resnet32
 from libs.cifar100 import Cifar100
 from libs.utils import get_one_hot
 import copy
@@ -36,10 +36,10 @@ class ExemplarSet(Dataset):
         return img, label
 
 
-class iCaRLModel(nn.Module):
+class GGE(nn.Module):
 
     def __init__(self, train_dataset: Cifar100, num_classes=100, memory=2000, batch_size=128, device='cuda'):
-        super(iCaRLModel, self).__init__()
+        super(GGE, self).__init__()
         self.num_classes = num_classes
         self.memory = memory
         self.known_classes = 0
@@ -47,7 +47,7 @@ class iCaRLModel(nn.Module):
         self.batch_size = batch_size
         self.device = device
 
-        self.net = resnet32(num_classes=num_classes)
+        self.net, self.generator = resnet32(device, num_classes=num_classes)
         self.dataset = train_dataset
 
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='mean')
@@ -59,8 +59,11 @@ class iCaRLModel(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-    def _extract_features(self, images):
-        return self.net(images, features=True)
+    def _extract_features(self, images, normalize=True):
+        features = self.net(images, features=True)
+        if normalize:
+            features = features / features.norm(dim=1).unsqueeze(1)
+        return features
 
     def increment_known_classes(self, n_new_classes=10):
         self.known_classes += n_new_classes
@@ -84,12 +87,15 @@ class iCaRLModel(nn.Module):
 
         train_losses = []
         train_accuracies = []
-
+        tmp_criterion = nn.BCEWithLogitsLoss(reduction='mean')
         for epoch in range(num_epochs):
             print(f"\tSTARTING EPOCH {epoch + 1} - LR={scheduler.get_last_lr()}...")
             cumulative_loss = .0
             running_corrects = 0
             self.net.train()
+
+            if self.known_classes > 0:
+                m = 500 - int(self.memory / self.known_classes)
             for i, (images, labels) in enumerate(loader):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
@@ -99,11 +105,21 @@ class iCaRLModel(nn.Module):
 
                 _, preds = torch.max(outputs.data, 1)
                 running_corrects += torch.sum(preds == labels.data).data.item()
+                generated_features = None
+                if self.known_classes > 0:
+                    generated_features, generated_labels = self.generator\
+                        .generate_features(np.arange(self.known_classes), m)
+                    generated_outputs = self.generator(generated_features)
+                    tmp_loss = tmp_criterion(generated_outputs, get_one_hot(generated_labels, self.num_classes, self.device))
+                else:
+                    tmp_loss = None
 
                 loss = self.compute_distillation_loss(images, labels, outputs)
                 loss_value = loss.item()
                 cumulative_loss += loss_value
 
+                if tmp_loss is not None:
+                    loss += tmp_loss
                 loss.backward()
                 optimizer.step()
 
@@ -201,12 +217,20 @@ class iCaRLModel(nn.Module):
 
         self.net.eval()
         flatten_features = []
+        not_normalized_features = []
         with torch.no_grad():
             for images, _ in loader:
                 images = images.to(self.device)
-                features = self._extract_features(images)
+                features = self._extract_features(images, normalize=False)
+                not_normalized_features.append(features.detach())
+                features = features / features.norm(dim=1).unsqueeze(1)
                 flatten_features.append(features)
 
+            # storing features to calculate mean and std
+            not_normalized_features = torch.cat(not_normalized_features).cpu().numpy()
+            #self.generator.add_data(not_normalized_features, [label]*not_normalized_features.shape[0])
+
+            # computing mean per class
             flatten_features = torch.cat(flatten_features).cpu().numpy()
             class_mean = np.mean(flatten_features, axis=0)
             class_mean = class_mean / np.linalg.norm(class_mean)
@@ -215,6 +239,7 @@ class iCaRLModel(nn.Module):
 
         exemplars = set()  # lista di exemplars selezionati per la classe corrente
         exemplar_feature = []  # lista di features per ogni exemplars già selezionato
+        feature_to_generalize = []
         for k in range(m):
             S = 0 if k == 0 else torch.stack(exemplar_feature).sum(0)
             phi = flatten_features
@@ -228,10 +253,12 @@ class iCaRLModel(nn.Module):
                 if indexes[i] not in exemplars:
                     exemplars.add(indexes[i])
                     exemplar_feature.append(flatten_features[i])
+                    feature_to_generalize.append(not_normalized_features[i])
                     break
 
         assert len(exemplars) == m
         self.exemplar_sets.append(list(exemplars))
+        self.generator.add_data(feature_to_generalize, [label]*len(feature_to_generalize))
 
     def random_construct_exemplar_set(self, indexes, label, m):
         choices = np.arange(len(indexes))
