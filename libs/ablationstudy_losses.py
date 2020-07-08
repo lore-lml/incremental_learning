@@ -13,7 +13,7 @@ def _compute_cross_entropy_loss(input, target):
 
 
 # distillation loss as described by Hinton et. al
-def _compute_hinton_loss(input, target):
+def _compute_smt_loss(input, target):
     T = 2
     input = torch.log_softmax(input / T, dim=1)
     target = torch.softmax(target / T, dim=1)
@@ -44,7 +44,6 @@ def _compute_l2_loss(input, target):
 
 # loss described in the "Learning a Unified Classifier Incrementally via Rebalancing"
 # measures the cosine similarity of the previous and new features representation (normalized)
-# lfc = less forget constraint
 def _compute_lfc_loss(input, target):
     input = F.normalize(input, p=2)
     target = F.normalize(target, p=2)
@@ -53,8 +52,6 @@ def _compute_lfc_loss(input, target):
     return loss
 
 
-# the CustomizedLoss compute a loss made by 2 terms:
-# a [classification] and a [distillation] term
 class ClassificationDistillationLosses:
     def __init__(self, classification, distillation, num_classes=100):
         self.num_classes = num_classes
@@ -63,7 +60,7 @@ class ClassificationDistillationLosses:
         self.loss_computer = {
             "bce": _compute_bce_loss,
             "ce": _compute_cross_entropy_loss,
-            "hinton": _compute_hinton_loss,
+            "smt": _compute_smt_loss,
             "kldiv": _compute_kldiv_loss,
             "lfc": _compute_lfc_loss,
             "l2": _compute_l2_loss,
