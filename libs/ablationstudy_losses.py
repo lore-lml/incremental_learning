@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,8 +35,8 @@ def _compute_kldiv_loss(input, target):
 
 
 def _compute_l2_loss(input, target):
-    input = nn.Softmax()(input)
-    target = nn.Softmax()(target)
+    input = torch.softmax(input, dim=1)
+    target = torch.softmax(target, dim=1)
     crit = nn.MSELoss(reduction='mean')
     return crit(input, target)
 
@@ -70,15 +69,18 @@ class ClassificationDistillationLosses:
         class_loss = self.loss_computer[self.classification](class_input, class_target)
 
         if self.distillation is not None and dist_input is not None and dist_target is not None:
+            dist_ratio = 1 - class_ratio
             if self.distillation == "lfc":
                 # lfc requires its own class-dist ratio
                 dist_ratio = 5 * math.sqrt(class_ratio / (1 - class_ratio))
                 class_ratio = 1
-            else:
-                dist_ratio = 1 - class_ratio
+            elif self.distillation == "bce" or self.distillation == "ce":
+                # if bce or ce are chosen for distillation, targets (old_outputs) must be first turned into logits
+                dist_target = torch.softmax(dist_target, dim=1)
 
             dist_loss = self.loss_computer[self.distillation](dist_input, dist_target)
-            tot_loss = class_ratio * class_loss + dist_ratio * dist_loss
+            dist_correction = dist_input.shape[1] / 100  # rescale distillation loss just for old classes
+            tot_loss = class_ratio * class_loss + dist_ratio * dist_correction * dist_loss
             return tot_loss
         else:
             return class_loss

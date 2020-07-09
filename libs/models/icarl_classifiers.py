@@ -288,8 +288,8 @@ class iCaRLModel(nn.Module):
         else:
             class_ratio = self.class_batch_size / (self.class_batch_size + self.known_classes)
             labels = utils.get_one_hot(labels, self.num_classes, self.device)
-            class_inputs = new_outputs[:, self.known_classes:]
-            class_targets = labels[:, self.known_classes:]
+            class_inputs = new_outputs
+            class_targets = labels
             if self.known_classes == 0:
                 dist_inputs = None
                 dist_targets = None
