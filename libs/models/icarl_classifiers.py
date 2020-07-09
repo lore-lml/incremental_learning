@@ -294,8 +294,9 @@ class iCaRLModel(nn.Module):
                 dist_inputs = None
                 dist_targets = None
             else:
-                dist_inputs = self.old_net(images)
-                dist_targets = labels
+                dist_inputs = new_outputs[:, :self.known_classes]
+                dist_targets = self.old_net(images)[:, :self.known_classes]
+
             return self.loss_computer(class_inputs, class_targets, dist_inputs, dist_targets, class_ratio)
 
     def _compute_distillation_loss(self, images, labels, new_outputs):
