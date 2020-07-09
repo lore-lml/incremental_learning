@@ -19,7 +19,7 @@ def _compute_smt_loss(input, target):
     target = torch.softmax(target / T, dim=1)
     loss = torch.sum(input * target, dim=1, keepdim=False)
     loss = -torch.mean(loss, dim=0, keepdim=False)
-    return T * T * loss
+    return loss
 
 
 # bce with hard target: classification loss in iCaRL
