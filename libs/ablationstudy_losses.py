@@ -36,8 +36,8 @@ def _compute_kldiv_loss(input, target):
 
 
 def _compute_l2_loss(input, target):
-    input = nn.Sigmoid()(input)
-    target = nn.Sigmoid()(target)
+    input = nn.Softmax()(input)
+    target = nn.Softmax()(target)
     crit = nn.MSELoss(reduction='mean')
     return crit(input, target)
 
