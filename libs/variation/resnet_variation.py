@@ -224,8 +224,8 @@ class ExemplarGenerator(nn.Module):
 
         return torch.from_numpy(features).to(self.device), torch.from_numpy(np.array(label_tensor)).to(self.device)
 
-    def forward(self, features):
-        return self.fc(features)
+    def forward(self, net, features):
+        return net.fc(features)
 
 
 class ProgressiveWALayer(nn.Module):

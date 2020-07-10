@@ -95,7 +95,7 @@ class GGE(nn.Module):
             self.net.train()
 
             if self.known_classes > 0:
-                m = 500 - int(self.memory / self.known_classes)
+                m = (500 - int(self.memory / self.known_classes)) / float(len(loader))
             for i, (images, labels) in enumerate(loader):
                 images = images.to(self.device)
                 labels = labels.to(self.device)
@@ -105,12 +105,12 @@ class GGE(nn.Module):
 
                 _, preds = torch.max(outputs.data, 1)
                 running_corrects += torch.sum(preds == labels.data).data.item()
-                generated_features = None
+                #generated_features = None
                 if self.known_classes > 0:
                     generated_features, generated_labels = self.generator\
                         .generate_features(np.arange(self.known_classes), m)
-                    generated_outputs = self.generator(generated_features)
-                    tmp_loss = tmp_criterion(generated_outputs, get_one_hot(generated_labels, self.num_classes, self.device))
+                    generated_outputs = self.generator(self.old_net, generated_features)
+                    tmp_loss = tmp_criterion(outputs, torch.softmax(generated_outputs))
                 else:
                     tmp_loss = None
 
